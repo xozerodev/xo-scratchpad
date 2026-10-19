@@ -138,6 +138,112 @@ Before this KDD is accepted, run in the dev Cosmos database set aside for the pa
 
 ---
 
+## KDD-002: Old and new app versions coexist on one source of truth
+
+| | |
+| --- | --- |
+| Status | Proposed |
+| Date | 2026-10-19 |
+| Owners | BFF, app team, data engineering, bet engine (decide); product (consulted on retirement and on behaviour changes older builds will see) |
+| Contract affected | Edge Picks producer pick record: adds `legacy_pick_ids` in a 4.x minor version. Snapshot API: none |
+| Supersedes | Rule C5 ("no id bridge") of the Oct 17 co-existence plan, for app versions only |
+
+### Decision
+
+1. **Coexistence is open-ended.** No date is assumed by which users have moved to the new app. Every app version still supported keeps getting the responses it gets today, until its routes are retired under point 7.
+2. **One source of truth.** Producer pick records (KDD-001) are the only place a pick's values are decided. Everything an older build reads about picks is derived from them. Nothing writes pick values for older builds independently.
+3. **Version routing stays in the BFF.** Every request already carries `api_version`, and the BFF already serves staged content only from version 6 (`gate.ts`). The new Edge Picks screen calls `GET /v4/edge-picks`; older builds keep calling today's routes and receive today's shapes.
+4. **A server-side switch per league** turns the new screen's data on or off for new builds without an app release. Turning it off returns nothing from `/v4/edge-picks` for that league; older builds are unaffected either way.
+5. **Two stages per league:**
+   - **Stage A, derived legacy documents.** In the same run, the Publish Engine writes the new records and projects them into the legacy documents (`game_prediction.top_picks`, `game_edge_picks`, `player_edge_picks`, `player_top_picks`). It uses one deterministic projection, tested against fixtures. Today's BFF routes read those documents unchanged.
+   - **Stage B, BFF adapters.** A legacy route moves to reading the new records through an adapter once its responses are proven equivalent (Validation). Legacy documents for a league stop being written only when no route and no other reader (push fan-out, WordPress feed, partner API) still reads them.
+6. **An identity bridge.** Each record carries the ids older builds saved for it, so a slip or follow made in one build resolves in the other. This adds `legacy_pick_ids` (array of strings, empty when none) to the producer pick record in a 4.x minor version. My Picks resolves a saved id by `pick_id` first, then by `legacy_pick_ids`.
+7. **Retirement is a product decision made on data.** A legacy route is retired only when the oldest supported app version no longer calls it. That is decided from the share of active users on each `api_version` (for example, under 1% for 30 days), or by a forced update if the app supports one.
+
+### Context
+
+- **Users cannot be forced onto the new build.** The release is a gradual rollout, so for weeks most users stay on the old build, and some never update.
+- **The store build sends `api_version` v5.** `RELEASE_API_VERSION_MAJOR = 6` in `src/lib/match/canonical/gate.ts` (mobile-server develop) already withholds staged content from earlier versions. The push fan-out and the WordPress feed carry no client version and are not gated.
+- **Today's readers of pick documents** (mobile-server develop): `match.ts`, `match-v3.ts`, `matches.ts`, `matches-top-predictions.ts`, `matches-top-predictions-v3.ts`, `my-picks-v2.ts` and `service-bus-push-events.ts`. No minimum-version or forced-update check was found in the BFF.
+- **The Oct 17 co-existence plan covers producer families,** not app versions. Each game is pinned to one schema family, with no id bridge (its C5). That still holds for producer families. But the same game is shown to old and new builds at the same time, so the same pick is seen under two ids, and a bridge is needed.
+- **Legacy pick ids** differ from v4 ids. NFL, MLB, WNBA and EPL use `{game_sk}_{bet_type}_{region}`, without the line. NBA uses `{game_sk}|{market}_{selection}|…|{region}` (app-data dev 2b6f998).
+
+### Options considered
+
+| Option | Summary | Verdict |
+| --- | --- | --- |
+| A. Independent dual write | Keep today's pipeline for older builds; add the new pipeline for the new build | Rejected: two sources drift. The same game would show different picks, prices or results in the two apps. The NBA engine's dev and tst branches already differ in how they select picks |
+| B. Clean cutover with forced upgrade | Switch each league once; require the new build | Rejected: upgrades cannot be forced, and the rollout is gradual |
+| C. BFF adapters from the start | Stop legacy documents when the new records start; serve every older route through adapters | Rejected for launch: every legacy route has to be proven equivalent before any league moves, which concentrates the risk at launch. Readers outside the versioned routes (push, WordPress, partner API) would break |
+| **D. Derived legacy documents, then adapters, league by league** | Stage A at launch, Stage B per route when proven | **Proposed** |
+
+### Why D
+
+- **One truth, two presentations.** Both apps show the same entry price, probability, stake and result for the same pick, because both come from one record.
+- **Nothing changes for older builds on day one.** Their routes read the same documents in the same shape, now produced by a projection instead of a separate pipeline.
+- **Risk is spread over time.** Each route moves to an adapter when it is proven, not all at launch.
+- **Rollback is a switch.** Turning a league off for the new build leaves the records, the derived documents and older builds untouched.
+- **Retirement stays in our hands,** based on usage data, not on when users choose to update.
+
+### What older builds will see
+
+The derived documents carry the same fields and words as today. Some behaviour follows the new records:
+
+| Behaviour | Older build today | Older build under D | Handling |
+| --- | --- | --- | --- |
+| A line move | NBA: the pick disappears | The pick stays at its entry line | An intended fix; product to confirm and announce |
+| An engine re-run that would drop a pick | The pick disappears | The pick stays until it is cancelled | An intended fix (persistence rule) |
+| A cancelled pick | Hidden (the BFF drops `cancelled`) | Hidden | No change |
+| `awaiting_result` | Not a known word | Written as the legacy word for a started, ungraded pick (`scheduled`) | Projection rule |
+| Free-user locks | Per-flag stripping on the legacy route | Unchanged | No change. The new leak rule applies only to `/v4/edge-picks` |
+| Push alerts | From the legacy documents | From the derived documents, same content | No change |
+
+### Cost and performance
+
+- **Writes:** the derived legacy documents are the writes the Publish Engine already makes today, so Stage A adds nothing. The new records add the KDD-001 figures: about $3 to $17 a month at 1,000 to 5,000 records a day.
+- **Reads:** older builds keep today's read costs. The new build adds the shared-cache reads in KDD-001.
+- **Stage B** removes one legacy write path per league as routes move over.
+
+### Consequences
+
+**Positive**
+
+- No user is forced to update, and none sees a picks experience that disagrees with another user's.
+- Saved slips and follows survive an upgrade.
+- Older builds can be retired on evidence, route by route.
+
+**Negative, and what handles it**
+
+| Cost | Handling |
+| --- | --- |
+| The Publish Engine maintains a projection to every legacy document shape | One projection, fixture-tested; retired shape by shape in Stage B |
+| The BFF serves two response families for a long time | Both read one source; Stage B shrinks the legacy family over time |
+| The contract gains `legacy_pick_ids` | A 4.x minor version, shipped readers-first |
+| Older builds see two behaviour changes (picks survive a line move or a re-run) | Listed above; product confirms and announces them with the redesign |
+
+### Validation
+
+1. **Projection equivalence.** For each league, replay a full slate through the new records and the projection. Compare every legacy route, at every `api_version` in use, with what today's pipeline serves for the same games. Only the differences listed above are allowed.
+2. **Cross-version identity.** Save a pick in an older build, open My Picks in the new build, and the reverse. Both resolve to the same pick, with the same entry values and result.
+3. **Switch.** Turn a league off and on for the new build during a live slate. Older builds' responses do not change at any point.
+4. **Mixed population.** Run the mock with users split across versions 5 and 6 on one day. Both views agree on picks, prices and results.
+
+### Open items
+
+- Whether the app can force an update or enforce a minimum version (app team).
+- Whether the partner API (`api-partners`) or any other service reads the pick containers directly (data engineering).
+- Where the per-league switch lives. The co-existence plan's registry is the likely home (BFF).
+- The usage threshold and notice period for retiring a legacy route (product).
+- Adding `legacy_pick_ids` to the producer pick record contract (contract owner).
+
+### Sources
+
+- mobile-server develop: `src/lib/match/canonical/gate.ts` (version gate), and the functions listed under Context (readers of pick documents)
+- app-data dev 2b6f998: `databricks/publisher/transformations_library.py`, `nba/nba_wltp.py`, `nba/nba_ps.py` (legacy documents and ids)
+- `edgepicks-redesign/coexistence-cutover-plan.md`, Oct 17 (producer-family co-existence, rules C1 to C9)
+
+---
+
 ## Template for a new KDD
 
 Copy this section, give it the next number, and add a row to the table at the top.
