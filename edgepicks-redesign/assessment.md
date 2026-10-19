@@ -1,7 +1,7 @@
 # Edge Picks redesign — independent assessment
 
 **Subject:** `edgepicks-redesign/` — `specs.md` (654 lines), `canonical-data-model.md` (746), `canonical-data-verification-plan.md` (171), `coexistence-cutover-plan.md` (120). All four dated 16–17 Oct 2026, author @Tze Liang.
-**Assessment date:** 19 Oct 2026. **Revision 2** (19 Oct, evening): Part 2 (§13–§16) reviews the 19 Oct revision of `specs.md` and the author's rebuttal, and supersedes Part 1 where they differ. Two Part 1 findings are retracted, three reclassified and one method claim corrected — see §13 — and the corrections are applied in place below.
+**Assessment date:** 19 Oct 2026. **Revision 3** (19 Oct, evening): Part 2 (§13–§16) reviews the first revision of `specs.md` and the author's first rebuttal; Part 3 (§17–§20) verifies the two engine findings, reviews the second revision, and supersedes Parts 1–2 where they differ. Two Part 1 findings are retracted, three reclassified and one method claim corrected (§13); one Part 2 finding is conceded (§17 E5) and one clone-staleness cause acknowledged (§17 E4). All corrections are applied in place below.
 **Method:** four independent verification streams against the deploying branches of the real estate, plus a red-team pass over the documents' own arithmetic and internal logic. ~180 commit-pinned verdicts. Evidence files (paths relative to the scratchpad root, `xo-scratchpad/`): `.verify/assessment/specs-findings.md`, `model-findings.md`, `plans-findings.md`, `redteam-findings.md`, `redteam-audit.md`, `azure-tst-check.md`.
 
 ---
@@ -14,11 +14,11 @@ Three of these four documents are unusually disciplined for design proposals: th
 
 It does not survive contact with the estate. Of 82 discrete claims in `specs.md` checked against the deploying refs, **13 are genuinely refuted** and 27 only partly hold (a further four were requirements misread as claims about today — §13 C3). The failures cluster precisely where the schedule is: the two rows with hard dates rest on an unmerged feature branch and on a misreading of which branch deploys. The canonical model treats a settlement write-back that does not exist as today's mechanism and books its cost at zero. And the folder contains **two mutually incompatible migration mechanisms** — the canonical model dual-publishes into shared containers, the cutover plan forbids exactly that — on top of **three different timelines** for the same cutover, and a frozen id contract that both of the others say must change.
 
-**The 19 Oct revision of `specs.md` fixes 11 of the 13 and accepts the rest** (§14). It is a materially better document: the edge-basis error, the id contradiction, the null-line rule, the status reality, the branch basis and the unbuilt-conformance observations are all corrected, and new acceptance criteria close the test gaps. What remains is small and listed in §15.
+**The two 19 Oct revisions of `specs.md` fix 11 of the 13 and accept the rest** (§14, §18). It is now a materially better document: the edge-basis error, the id contradiction, the null-line rule, the status reality, the branch basis, the unbuilt-conformance observations and all six cross-document conflicts are corrected or deferred, and new acceptance criteria close the test gaps. What remains is small, listed in §15 and §19 — and the largest of it is no longer in the document: **the NBA player-pick engine changed direction on 16 Oct**, deleting picks a re-run no longer produces and blending the published probability toward the market (§17). Both are deliberate, both are dev-only so far, and both are disagreements to settle with another team rather than lines to fix in a spec.
 
 | Document | Verdict | One line |
 | --- | --- | --- |
-| `specs.md` | **GO as the app-facing contract, after the 19 Oct revision** | Part 1's "revise, do not reject" was right; the revision landed 11 of the 13 genuine fixes. Remaining items are in §15. |
+| `specs.md` | **GO as the app-facing contract, after two revisions** | Part 1's "revise, do not reject" was right; the revisions landed 11 of the 13 genuine fixes and closed all six §5.2 conflicts on the spec side. Remaining items are in §15 and §19. |
 | `canonical-data-model.md` | **Approve the direction, defer the build** | Genuine model improvements; 20 substantive divergences from `specs.md` and a large build booked at zero cost. |
 | `canonical-data-verification-plan.md` | **Cut to a v1 or fund it as a programme** | Right rule decomposition, right test strategy, no owners, no dates, foundation lands after 1A. |
 | `coexistence-cutover-plan.md` | **Adopt as the migration design, then write the runbook** | The most accurate evidence table in the folder and the least complete plan. |
@@ -355,6 +355,62 @@ Small, but each one is cheap now and expensive later.
 - **(c) Add the "serves tst" column (or a per-row branch tag) to the branch table**, and say in §9 that a dev-branch observation describes the code under change rather than what users receive today.
 
 With those three, `specs.md` is the strongest document in the folder and safe to build the app contract against. The canonical model, the verification plan and the cutover plan still need the §5.2 conflicts closed and the §11 actions — none of which this revision touched.
+
+# Part 3 — the second revision, and two engine findings that change the picture
+
+`specs.md` was revised again on 19 Oct (`4b6b3ab`, 21 insertions / 20 deletions) in response to Part 2. This part verifies the two engine findings the author raised, records what the revision fixes, and states what is left — which is now mostly on the other side of the seam.
+
+## 17. Verification of the two engine findings
+
+Both are real. Both are more precisely scoped than reported, and one of them is narrower and one is broader than the spec implies.
+
+**E1 — the player-pick engine replaces picks per evaluated game (`45f6f4f`, 16 Oct 02:30). Confirmed.** `upsert_delta` gained a `replace_game_sks` argument and applies `whenNotMatchedBySourceDelete(condition="t.game_sk IN (…)")`; the scope comes from `games_in_scope(...)` — games **before the pre-game cutoff** that have *both* odds and projections. So the behaviour is narrower than "each run deletes what it no longer produces":
+
+- a game the run did not evaluate is untouched — past the cutoff it is frozen, and with no odds or projections it is not evaluated at all, so **a feed outage cannot wipe its picks** (the docstring says this explicitly);
+- a game the run *did* evaluate loses any row the new output does not contain.
+
+That scoping makes the engine team's rationale visible and reasonable: anti-staleness, outage-safe. It also means the conflict with AC-45 is a **design disagreement with a stated rationale**, not an oversight — and AC-45's own test ("publish a pick, move its line and drop its edge below the threshold in the next run; the pick is still present") is red against it for exactly the re-evaluated case. One more fact the spec should carry: the three 16 Oct commits are **not in `tst`** (tip `0430eb5`, 13 Oct), so the conflict is not yet user-visible — it becomes so at the next promotion, and that, not 23 Oct, is the real deadline.
+
+**E2 — the published player-pick probability is blended toward the market (`0d6a59b`, 16 Oct 03:50). Confirmed, and broader than "product should confirm".** The mechanism: no-vig market probability from the same (game, player, stat, bookmaker, line) pair — raw implied divided by the pair sum, one-sided quotes falling back to `1/odds` — then `w = exp(−|ln(1/p_model) − ln(1/p_market)| / k)`, `p = w·p_model + (1−w)·p_market`, with `k = 1.0` (the POF reference default is 0.5) and a hard drop at a disagreement of 0.30 or more. The published `probability`, `edge = p − 1/d`, and therefore `model.probability` and the break-even `b`, are all the blended value. Two consequences beyond the author's:
+
+- **The blend is strongest exactly where the model disagrees with the market** (`w → 0` as the gap grows), and the largest disagreements are dropped outright. The card's "XO Edge" is no longer a model-disagreement signal; it is a market-corroborated price-shopping signal with a capped disagreement. That is a product-positioning question, not a display-basis one.
+- **The 0.30 cap is not expressible in the producer contract.** §8.3's `edge_threshold` cannot describe it, so no consumer — and no validation rule — can reproduce why a pick exists from the published fields.
+
+**E3 — the 3 percentage-point floor (`8cba698`, 16 Oct 03:56). Confirmed, and my §15.6 challenge is resolved.** The floor arrived on 16 Oct, exactly as the author said; my clone was at 8 Oct. Two details the spec should carry:
+
+- it is implemented as the lowest **staking tier** (`PS_TIER_THRESHOLDS`, lowest `(3.0, 1, 1.0)`) with `.where(tier > 0)`, so the selection floor and the stake ladder are one table — a staking change silently moves which picks exist;
+- the game-pick engine is unchanged: `_wltp_engine.py:633` still selects on `edge > 0.0`, so §5.3's two statements ("NBA game picks above 0, NBA player picks at least 3 percentage points") are both accurate, verified at the engine rather than inferred.
+
+**E4 — my clone, again. Acknowledged.** `nba_bet_engine` `dev` is locally `621ab3c1` (8 Oct) against a remote `362fb7e2`. §15.6 said the claim "is not reproducible from the checkout I hold" and asked for a commit pin, which was the right hedge — but the cause was a stale clone for the third time in two rounds (live-scores, mobile-server, now nba_bet_engine). That pattern is the strongest argument for the revision's own rule: re-read a row from a fresh fetch before a gate relies on it.
+
+**E5 — AC-28. Conceded.** A settled pick on a game that is not final is reachable when the outcome and live-score feeds lag each other, and §5.4's first-match rules give a deterministic rendering, so the criterion tests something real. My "six unreachable cells" assumed a single consistent source. The revision's wording is the right fix.
+
+## 18. What the second revision fixes
+
+All seven §15 items and §16(a) are in: §8.2's clarifying sentence; AC-45's own conformance row; the §11.1 1A note; the "Serves tst (production) from" column with per-repository commits and the dev-observation caveat; X14 and the conformance matrix at "options A and B (not A′)"; the §4.5 ETag observation; the `8cba698` pin plus the blended-probability record; X1 pinned to `tst-blue` `a1c16f4`; and AC-28's rationale.
+
+It also closes the remaining spec-side cross-document conflicts: **D5 now recommends the canonical model's R3 vocabulary**, §8.1 defers the document layout to the decision record, and §11.1's 1B is per-league. That is **all six conflicts in §5.2 closed on the spec side**. What remains is that the decision record does not exist yet, and the other three documents have not been revised.
+
+## 19. What is still open
+
+1. **AC-45 is red against the current NBA player engine, and §11.1 still promises cancelled status on 31 Oct.** The revision records the conflict in X15 and notes the published-pick record is not in the roadmap — but the 1A row still *delivers* cancelled status. Make it conditional in that row (delivered when X15 lands) or move the card treatment to 1B. As written, 1A's date depends on a cross-team reversal of a three-day-old deliberate change.
+2. **A′'s current edge needs a definition, not a disclaimer.** §5.3 now says a BFF-derived current edge "can differ from the engine's own re-evaluation". True — and it will differ in **both** directions, because the BFF holds `p` at the entry blend while the engine re-blends toward the market at the new price (and re-applies the 3% floor and the 0.30 cap). Two honest options: define the A′ current edge as a *contract quantity* — frozen entry `p` × current price, labelled as such — or wait for the engine's own value through the X12/1B path. What must not ship is an unexplained divergence at the `edge_state` boundary, where the card reads `live` while the engine's own re-evaluation would read `closed`. That is the headline feature being wrong, not a rounding difference.
+3. **The blend changes what "Edge" means on the card** (§17 E2). D3's new sentence asks product to confirm the card may show a blended probability; the larger question is whether an edge that is pulled toward the market, and capped at 0.30 disagreement, still supports the redesign's "still in play" framing.
+4. **The 3% floor is a staking tier** (§17 E3). Record the coupling so D14's cancel thresholds and any future stake change know they move the selection boundary.
+5. **The 0.30 disagreement cap has no field** (§17 E2). Add one, or state that not every selection rule is expressible; otherwise the validation plan's `PRB` family ("the entry satisfies its own `selection_rule`") cannot check it.
+6. **X15 needs the engine team's *reason*, not just agreement.** The docstring shows a deliberate anti-staleness, outage-safe design. The persistence rule should answer it in the engine's own terms — keep the pick and mark it `cancelled` with a reason, which is what the card wants and what AC-45 tests — rather than assert that the engine must merge.
+7. **Minor:** the branch table's `tst` commits are promotion state, not evidence. `nba_bet_engine` `tst` at `0430eb5` (13 Oct) means the two engine findings are dev-only; X15 should say so, so nobody reads the AC-45 conflict as live behaviour.
+
+## 20. Verdict after the second revision
+
+| Document | Status | Condition |
+| --- | --- | --- |
+| `specs.md` | **GO as the app-facing contract** | Three conditions: reconcile AC-45 with §11.1's 1A promise; define the A′ current edge (or gate it on the engine's own value); open the engine-team conversation with the promotion date as the deadline. |
+| `canonical-data-model.md` | **Unchanged — direction GO, build NO-GO** | Cost the settlement write-back; accept §8.1's deferral and settle the decision record; keep `legacy_ids[]`. |
+| `canonical-data-verification-plan.md` | **Unchanged — NO-GO as written** | Cut to a v1 or fund it as a programme; the 0.30 cap is a fresh example of a rule that cannot be checked without a producer field. |
+| `coexistence-cutover-plan.md` | **Unchanged — GO as the migration design, NO-GO as a runbook** | Owners, dates, a production one-family invariant check, and a rollback trigger. |
+
+The spec has converged faster than the rest of the folder, and its remaining risk has moved from *documentation* to *coordination*: the two engine findings are disagreements with another team, and the decision record it now defers to three times does not exist. Neither is fixable inside `specs.md`.
 
 ---
 
