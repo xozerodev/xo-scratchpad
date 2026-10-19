@@ -11,7 +11,7 @@ Every Edge Pick is stored as one typed record per pick per region, with the same
 | Producers | Bet engines compute the values; the Publish Engine is the only writer of pick documents |
 | Consumers | BFF (builds the app's Edge Picks response); live edge monitor (reads ids, entry values, probability, basis and threshold); settlement |
 | Contract owner | App team; the bet engine and data engineering teams sign as producers, the BFF and monitor teams as consumers |
-| Store | Pick documents in Cosmos. Container, partitioning and document grouping are not fixed by this page (see "Not yet decided"); the record shape is |
+| Store | Pick documents in Cosmos. The layout is proposed in KDD-001 (kdds.md): one record per document in a new container, partitioned by game\_sk, with the document id equal to pick\_id. This page fixes the record shape and the id rule, not the container |
 
 ### Conventions on this page
 
@@ -20,13 +20,13 @@ Every Edge Pick is stored as one typed record per pick per region, with the same
 - Numbers are JSON numbers, never strings. Decimal odds carry at most 4 decimal places; American odds are integers.
 - Probabilities and edges are fractions: 0.05, never 5 or "5%". A producer that works in percentage points divides by 100 before writing.
 - Times are ISO 8601 UTC with Z and milliseconds: 2026-10-22T18:05:12.341Z.
-- Ids are opaque to every consumer. No consumer parses pick\_id.
+- Ids are opaque to every consumer. No consumer parses pick\_id. Producers build it with one formula ("Pick id").
 - Enum values are lowercase. Consumers ignore fields they do not know; producers write no field this page does not define.
 - Within 4.x a new optional field or enum value is a minor version, shipped only after every consumer handles it. A rename, removal, type change or change of meaning is version 5, written alongside 4 until consumers have moved.
 
 ## Rules a producer keeps
 
-1. **Identity.** pick\_id is unique within a region and never changes when the price or line moves. It includes the line wherever two picks could otherwise share game, market (or player and stat) and side. A pick on a new line is a new pick with its own id.
+1. **Identity.** pick\_id is built by the formula under "Pick id", which makes it unique across every record, in every sport and region: records for the same selection in au and us have different ids. It never changes when the price or line moves. A pick on a new line is a new pick with its own id, and a selection recommended again after its pick was cancelled or withdrawn gets a re-issue suffix. It is at most 255 characters from A–Z, a–z, 0–9 and `_ . ~ | -`, so it is always a legal Cosmos document id and, once the BFF turns `|` into `_`, a legal push-topic name for pick follows.
 2. **Persistence.** Once published, a pick appears in every later publish of its document until it is settled or void. A pick the engine no longer backs becomes cancelled, with a reason; one published in error becomes withdrawn. Rebuilding picks from scratch on each run must not drop earlier picks, and pausing or switching a producer off stops new picks without removing published ones.
 3. **Frozen entry.** pick\_date\_time, probability, stake\_units and every entry\_ field keep their first-publish values for the pick's life. Later runs update only current\_ fields, observed\_at, is\_closing, edge\_status, pick\_status, status\_reason and outcome.
 4. **Observation time.** A record with a current price carries observed\_at, the time the price was seen at the book, not the time the record was written.
@@ -84,6 +84,7 @@ Frozen fields keep their first-publish value; live fields change as later runs o
 | schema\_version | string, 4.x.y | never | Version of this contract the record follows | per write |
 | pick\_id | string | never | Identity (rule 1) | frozen |
 | region | au, us | never | Region the pick is published for | frozen |
+| sport | nba, nfl, mlb, wnba, epl | never | League of the game, the same value the app's sport field carries | frozen |
 | game\_sk | integer | never | The game | frozen |
 | pick\_kind | game, player | never | Stated, never inferred from the container | frozen |
 | market | moneyline, spread, total, draw, btts, player\_prop | never | player\_prop exactly when pick\_kind is player | frozen |
@@ -187,7 +188,7 @@ Two complete records, both valid against the schema below. P1, an NBA player pic
 {
   "schema_version": "4.0.0",
   "pick_id": "40021717862|400000000434|pts|player_over|24.5|main|full|us",
-  "region": "us", "game_sk": 40021717862,
+  "region": "us", "sport": "nba", "game_sk": 40021717862,
   "pick_kind": "player", "market": "player_prop", "side": "over", "line": 24.5,
   "team_sk": null, "player_sk": 400000000434, "stat_code": "pts",
   "probability": 0.6565, "projection_value": null, "projection_unit": null,
@@ -207,8 +208,8 @@ G4, an EPL draw on the expected-value basis (0.30 × 3.60 − 1 = 0.08) for the 
 ```json
 {
   "schema_version": "4.0.0",
-  "pick_id": "500000123_DRAW_au",
-  "region": "au", "game_sk": 500000123,
+  "pick_id": "500000123|draw_draw|draw|null|main|full|au",
+  "region": "au", "sport": "epl", "game_sk": 500000123,
   "pick_kind": "game", "market": "draw", "side": "draw", "line": null,
   "team_sk": null, "player_sk": null, "stat_code": null,
   "probability": 0.3, "projection_value": null, "projection_unit": null,
@@ -223,9 +224,77 @@ G4, an EPL draw on the expected-value basis (0.30 × 3.60 − 1 = 0.08) for the 
 }
 ```
 
+## Pick id
+
+Every producer builds pick\_id with one formula: the NBA canonical id (NBA 2026 Schema Specification §3.9), extended for markets NBA does not have. NBA ids already published keep their exact spelling. Consumers still never parse pick\_id; the formula exists so every producer mints the same id for the same pick, and so the id meets rule 1.
+
+| Pick | pick\_id |
+| --- | --- |
+| Game pick | `{game_sk}\|{market}_{selection}\|{selection}\|{line}\|main\|full\|{region}` |
+| Player prop | `{game_sk}\|{player_sk}\|{stat_code}\|player_{side}\|{line}\|main\|full\|{region}` |
+| Either, re-issued | The same, followed by `\|r{n}` |
+
+| Part | Value |
+| --- | --- |
+| game\_sk, player\_sk, stat\_code, region | The record's own values |
+| market | The market token: `h2h` for moneyline; `spread`, `total`, `draw` and `btts` as the record's market. A new market adds its token here, in lowercase letters and digits only, with no `_` or `\|` |
+| selection | `t1` or `t2` for the backed team: its slot in the schedule (team\_1 or team\_2), found from team\_sk, never from home or away. Otherwise the record's side: `over`, `under`, `yes`, `no` or `draw` |
+| selection, multi-way (reserved) | `k{competitor_sk}` for one team, player or pair among several (a tournament winner), and `p{player_sk}` for one player among a game's players (first touchdown scorer). The record cannot yet carry these picks; the side value and competitor field they need come in a 4.x minor version with the first such market |
+| side | The record's side, for player props: `over`, `under`, `yes` or `no` |
+| line | `null` when the record's line is null. Otherwise the shortest decimal that reads back as the same number, with at least one digit after the point: `24.5`, `-4.5`, `3.0`, `220.0`, `-0.25`; zero is `0.0`, never `-0.0`. This is what Python's `repr` of a float and Spark's cast of a double to string both write |
+| `main`, `full` | Fixed in 4.x. The record has no variant or period, so an alternate line is the same pick as a main line at that line, and full game is the only period |
+| `r{n}` | Only on a re-issue: the engine recommends a selection again after its earlier pick in that region was cancelled or withdrawn. The first re-issue is `r2`, then `r3`. A first issue has no suffix |
+
+Rules:
+
+- **Checked by rebuilding.** Producer CI rebuilds each pick\_id from the record's fields and the schedule and rejects a record whose id differs.
+- **`h2h` marks moneyline, and nothing else.** Older app builds recognise a moneyline pick by `h2h` in its id and keep only one side of a game's moneyline in a slip. No other token contains `h2h`.
+- **Unique across sports.** game\_sk must never be used by two sports. Until data engineering confirms that the key ranges cannot overlap, producer CI rejects a game\_sk the store already holds for another sport.
+- **The selection is the id without its region.** Removing `|{region}` and any `|r{n}` gives the selection, which au and us picks on the same line share and which settlement grades once.
+- **Re-issue and reopening.** If cancelled picks may return to open (see "Not yet decided"), the cancelled record reopens under its own id and no re-issue is minted.
+- **Follow topics.** Market tokens contain no `_`, and each form has a fixed number of parts, so two ids never differ only by `|` against `_`, which would give them the same follow topic.
+
+| Pick | pick\_id |
+| --- | --- |
+| NBA spread on the team\_1 side (as published today) | `40021717862\|spread_t1\|t1\|-4.5\|main\|full\|us` |
+| NBA moneyline (as published today) | `40021717862\|h2h_t1\|t1\|null\|main\|full\|au` |
+| NBA player prop (as published today) | `40021717862\|400000000434\|pts\|player_over\|24.5\|main\|full\|us` |
+| NFL spread on a whole line | `300019484\|spread_t2\|t2\|3.0\|main\|full\|us` |
+| EPL draw | `500000123\|draw_draw\|draw\|null\|main\|full\|au` |
+| EPL both teams to score, no | `500000123\|btts_no\|no\|null\|main\|full\|au` |
+| NFL anytime touchdown | `300019484\|300123456\|anytime_td\|player_yes\|null\|main\|full\|us` |
+| NBA total re-issued after a cancellation | `40021717862\|total_over\|over\|224.5\|main\|full\|us\|r2` |
+| Reserved: golf tournament winner | `7001234\|winner_k3301\|k3301\|null\|main\|full\|us` |
+| Reserved: NFL first touchdown scorer | `300019484\|firsttd_p300123456\|p300123456\|null\|main\|full\|us` |
+
+Reference implementation (Python); producers in other languages must produce the same strings:
+
+```python
+MARKET_TOKEN = {"moneyline": "h2h", "spread": "spread", "total": "total", "draw": "draw", "btts": "btts"}
+
+def line_token(line):
+    if line is None:
+        return "null"
+    x = float(line)
+    return repr(0.0 if x == 0 else x)  # 24.5, -4.5, 3.0, 220.0, -0.25
+
+def pick_id(record, team_slot=None, reissue=1):
+    """team_slot: "t1" or "t2", the backed team's slot in the schedule; needed when team_sk is set."""
+    r = record
+    if r["pick_kind"] == "player":
+        parts = [r["game_sk"], r["player_sk"], r["stat_code"], "player_" + r["side"]]
+    else:
+        selection = team_slot if r["team_sk"] is not None else r["side"]
+        parts = [r["game_sk"], MARKET_TOKEN[r["market"]] + "_" + selection, selection]
+    parts += [line_token(r["line"]), "main", "full", r["region"]]
+    if reissue > 1:
+        parts.append(f"r{reissue}")
+    return "|".join(str(p) for p in parts)
+```
+
 ## JSON Schema
 
-JSON Schema draft 2020-12, complete: it references nothing outside itself. It is closed (no field it does not define) and encodes the null rules for observations, pulled prices, sources, game and player picks, markets, lines and projections, so producer CI rejects any record that breaks them. Consumers do not validate at runtime and ignore fields they do not know, so a later 4.x that adds a field never breaks an older consumer. Rules 1 to 3 and 6 compare a record with its earlier versions, so producer CI checks them against the previous publish; the 4-decimal limit is also a test, not a schema keyword.
+JSON Schema draft 2020-12, complete: it references nothing outside itself. It is closed (no field it does not define) and encodes the null rules for observations, pulled prices, sources, game and player picks, markets, lines and projections, so producer CI rejects any record that breaks them. Consumers do not validate at runtime and ignore fields they do not know, so a later 4.x that adds a field never breaks an older consumer. Rules 1 to 3 and 6 compare a record with its earlier versions or with other records, so producer CI checks them against the run's whole output and the previous publish (pick\_id unique across the output and the store; frozen fields unchanged; status forward only); the 4-decimal limit is also a test, not a schema keyword. The schema validates the record, not the stored document: the Publish Engine adds the Cosmos id when it writes, and a reader removes Cosmos's own fields (id and those starting with \_) before validating a document read back.
 
 ```json
 {
@@ -233,11 +302,12 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. It is
   "$id": "https://contracts.xosports.ai/edge-picks/v4/producer-pick.schema.json",
   "title": "Edge Picks producer pick record 4.0.0",
   "type": "object",
-  "required": ["schema_version", "pick_id", "region", "game_sk", "pick_kind", "market", "side", "line", "team_sk", "player_sk", "stat_code", "probability", "projection_value", "projection_unit", "pick_date_time", "entry_decimal_odds", "entry_american_odds", "entry_edge", "edge_basis", "edge_threshold", "stake_units", "odds_source_kind", "entry_bookmaker_id", "current_decimal_odds", "current_american_odds", "current_line", "current_odds_source_kind", "current_bookmaker_id", "observed_at", "is_closing", "current_edge", "edge_status", "rec_action", "pick_status", "status_reason", "outcome"],
+  "required": ["schema_version", "pick_id", "region", "sport", "game_sk", "pick_kind", "market", "side", "line", "team_sk", "player_sk", "stat_code", "probability", "projection_value", "projection_unit", "pick_date_time", "entry_decimal_odds", "entry_american_odds", "entry_edge", "edge_basis", "edge_threshold", "stake_units", "odds_source_kind", "entry_bookmaker_id", "current_decimal_odds", "current_american_odds", "current_line", "current_odds_source_kind", "current_bookmaker_id", "observed_at", "is_closing", "current_edge", "edge_status", "rec_action", "pick_status", "status_reason", "outcome"],
   "properties": {
     "schema_version": {"type": "string", "pattern": "^4\\.\\d+\\.\\d+$"},
-    "pick_id": {"type": "string", "minLength": 1},
+    "pick_id": {"type": "string", "maxLength": 255, "pattern": "^(\\d+\\|[a-z0-9]+_(t1|t2|over|under|yes|no|draw|k\\d+|p\\d+)\\|(t1|t2|over|under|yes|no|draw|k\\d+|p\\d+)\\|(null|0\\.0|-?[1-9]\\d*\\.(0|\\d*[1-9])|-?0\\.\\d*[1-9])\\|main\\|full\\|(au|us)(\\|r([2-9]|[1-9]\\d+))?|\\d+\\|\\d+\\|[a-z0-9_]+\\|player_(over|under|yes|no)\\|(null|0\\.0|-?[1-9]\\d*\\.(0|\\d*[1-9])|-?0\\.\\d*[1-9])\\|main\\|full\\|(au|us)(\\|r([2-9]|[1-9]\\d+))?)$"},
     "region": {"enum": ["au", "us"]},
+    "sport": {"enum": ["nba", "nfl", "mlb", "wnba", "epl"]},
     "game_sk": {"type": "integer"},
     "pick_kind": {"enum": ["game", "player"]},
     "market": {"enum": ["moneyline", "spread", "total", "draw", "btts", "player_prop"]},
@@ -414,6 +484,7 @@ An open NBA spread selected on the expected-value basis with threshold 0: entry 
   "schema_version": "4.0.0",
   "pick_id": "40021717862|spread_t1|t1|-4.5|main|full|us",
   "region": "us",
+  "sport": "nba",
   "game_sk": 40021717862,
   "pick_kind": "game", "market": "spread", "side": "home", "line": -4.5,
   "team_sk": 40000002, "player_sk": null, "stat_code": null,
@@ -446,7 +517,7 @@ Observations, not requirements: what the dev branches did when checked. Producti
 | Settlement write-back | app-data dev 2b6f998 | n/a | Stubs are empty | n/a | No producer sets settled or void through it |
 | Live edge monitor | live-odds dev 30e05ce | {bet id}\|{REGION} | Watches only Scheduled picks | Expected value, t = 0 | Its ids match no pick\_id; observations do not reach the record through the Publish Engine (rule 5); when a re-run changes a pick's id, the old overlay node is never deleted |
 
-Fields still to add, by producer: pick\_kind, market, side and line as structured fields (all); edge\_basis, edge\_threshold, odds\_source\_kind and entry\_bookmaker\_id (all); pick\_date\_time, entry odds, entry\_edge and stake\_units (all except NBA, which has them; WNBA player picks lack pick\_date\_time); projection; current line and bookmaker; observed\_at; is\_closing (derived by the Publish Engine); current\_edge and edge\_status (NFL has them from the monitor only); outcome as won, lost, push, void instead of 0, 1, 2.
+Fields still to add, by producer: sport (all); pick\_id built by the formula under "Pick id" (all except NBA, which already uses it; the WNBA player-pick id is the game\_sk alone); pick\_kind, market, side and line as structured fields (all); edge\_basis, edge\_threshold, odds\_source\_kind and entry\_bookmaker\_id (all); pick\_date\_time, entry odds, entry\_edge and stake\_units (all except NBA, which has them; WNBA player picks lack pick\_date\_time); projection; current line and bookmaker; observed\_at; is\_closing (derived by the Publish Engine); current\_edge and edge\_status (NFL has them from the monitor only); outcome as won, lost, push, void instead of 0, 1, 2.
 
 ### Values the BFF accepts until producers write this page's statuses
 
@@ -473,11 +544,11 @@ Fields still to add, by producer: pick\_kind, market, side and line as structure
 | When the engine cancels | When it stops backing a pick before the game; never for a line move alone | Which re-evaluations cancel, and with which reasons | Oct 30, 2026 |
 | Engine persistence | Rule 2 | How the NBA engine keeps earlier picks while rebuilding, and how a producer pauses without removing published picks (the NBA player-pick switch clears them today) | Before the engine's next tst promotion, and before NBA player picks are reinstated |
 | Periods, quarter lines | Full game only; no quarter lines | Halves or quarters would add a period field, a minor version | Not scheduled |
-| Document layout and id format | Not fixed; the record shape is | Container, partitioning, grouping, and a common pick\_id format | Not scheduled |
+| Document layout and id format | Layout proposed in KDD-001; the id formula is fixed ("Pick id") | The container name per environment; tokens for markets added later; confirmation that game\_sk ranges never overlap between sports | With KDD-001 |
 | App display basis | Not a producer concern; the BFF converts | Nothing on this page | Oct 23, 2026 |
 
 ## Change log
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market. After review: schema closed, with the observation, pulled-price, source, game-pick, line and projection rules; pausing never removes picks; 5-minute observation rule; nba\_bet\_engine and live-odds observations moved to 3bfbb8b and 30e05ce. Second review: current\_line must also be positive on totals and over/under props | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market. After review: schema closed, with the observation, pulled-price, source, game-pick, line and projection rules; pausing never removes picks; 5-minute observation rule; nba\_bet\_engine and live-odds observations moved to 3bfbb8b and 30e05ce. Second review: current\_line must also be positive on totals and over/under props. KDD review: sport added; pick\_id unique across regions and sports, with a restricted character set; the schema validates the record, not the stored document. Pick id formula: the NBA canonical id for every producer, with one line spelling, a re-issue suffix and reserved multi-way selections; the schema checks its shape; the EPL example id rewritten | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |

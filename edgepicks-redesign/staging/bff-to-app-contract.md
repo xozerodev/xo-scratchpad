@@ -80,7 +80,7 @@ Every field below is always present; "Null when" lists the only cases it may be 
 
 | Field | Type | Null when | Meaning |
 | --- | --- | --- | --- |
-| id | string | never | The pick's id, also used in My Picks and support logs. A price or line move never changes it |
+| id | string | never | The pick's id: the producer record's pick\_id, which older app builds also see for the same pick (KDD-002). Also used in My Picks and support logs. A price or line move never changes it |
 | overlay\_key | string | the pick has no live overlay (not open, game started, or no monitor covers the sport); or selection, odds or edge is hidden for this user | Key of the pick's realtime edge overlay. Provisional format |
 | sport | enum | never | League of the game |
 | kind | game, player | never | game: a team or game market. player: a player prop |
@@ -892,4 +892,4 @@ Everything else on this page is the target. Build against the provisional values
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day, after review: schema closed and given the selection, free-user and overlay\_key rules; free-user tie-break matches the agreed rule; which picks are locked, AU wording, refresh rules and the day-window vectors added. Second review: pulled-price nulls for current.line and current.edge; the schema now also checks both directions of the free-user groups, unknown edge state before any observation, suspended meaning no price, completed picks never locked, and positive current lines on totals and over/under props | App team: pending. BFF: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day, after review: schema closed and given the selection, free-user and overlay\_key rules; free-user tie-break matches the agreed rule; which picks are locked, AU wording, refresh rules and the day-window vectors added. Second review: pulled-price nulls for current.line and current.edge; the schema now also checks both directions of the free-user groups, unknown edge state before any observation, suspended meaning no price, completed picks never locked, and positive current lines on totals and over/under props. KDD review: id is the producer's pick\_id, the same id older builds see | App team: pending. BFF: pending |
