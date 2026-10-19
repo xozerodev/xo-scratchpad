@@ -389,7 +389,7 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. It is
     },
     {
       "if": {"properties": {"market": {"enum": ["total", "player_prop"]}, "side": {"enum": ["over", "under"]}}},
-      "then": {"properties": {"line": {"exclusiveMinimum": 0}}}
+      "then": {"properties": {"line": {"exclusiveMinimum": 0}, "current_line": {"exclusiveMinimum": 0}}}
     },
     {
       "if": {"properties": {"line": {"type": "null"}}},
@@ -480,4 +480,4 @@ Fields still to add, by producer: pick\_kind, market, side and line as structure
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market. After review: schema closed, with the observation, pulled-price, source, game-pick, line and projection rules; pausing never removes picks; 5-minute observation rule; nba\_bet\_engine and live-odds observations moved to 3bfbb8b and 30e05ce | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market. After review: schema closed, with the observation, pulled-price, source, game-pick, line and projection rules; pausing never removes picks; 5-minute observation rule; nba\_bet\_engine and live-odds observations moved to 3bfbb8b and 30e05ce. Second review: current\_line must also be positive on totals and over/under props | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |

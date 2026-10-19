@@ -96,8 +96,8 @@ Every field below is always present; "Null when" lists the only cases it may be 
 | entry.source | OddsSource | never | Where the entry price came from. Never hidden |
 | current | object | no market observation yet | The market as last observed. Once the game starts, the last observation before the start |
 | current.odds | Odds | odds hidden, or the book has pulled the price | Last observed price |
-| current.line | number | the market has no line, or selection hidden | Last observed line; differs from entry.line after a line move |
-| current.edge | number | edge hidden, or current.line differs from entry.line | model.probability × current decimal − 1 |
+| current.line | number | the market has no line, selection hidden, or the book has pulled the price | Last observed line; differs from entry.line after a line move |
+| current.edge | number | edge hidden, the book has pulled the price, or current.line differs from entry.line | model.probability × current decimal − 1 |
 | current.source | OddsSource | not known | Where the current price was observed |
 | current.observed\_at | date-time | never (inside current) | When the price was observed at the book, not when the BFF read it |
 | current.is\_closing | boolean | never (inside current) | true for the last observation before the game started |
@@ -416,7 +416,8 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. It is
               "entry": {"properties": {"line": {"type": "null"}}},
               "current": {"properties": {"line": {"type": "null"}}}
             }
-          }
+          },
+          "else": {"properties": {"selection": {"type": "object"}}}
         },
         {
           "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "odds"}}}}}},
@@ -427,13 +428,15 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. It is
               "entry": {"properties": {"odds": {"type": "null"}}},
               "current": {"properties": {"odds": {"type": "null"}}}
             }
-          }
+          },
+          "else": {"properties": {"entry": {"properties": {"odds": {"type": "object"}}}}}
         },
         {
           "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "probability"}}}}}},
           "then": {
             "properties": {"edge_holds_above": {"type": "null"}, "model": {"properties": {"probability": {"type": "null"}}}}
-          }
+          },
+          "else": {"properties": {"model": {"properties": {"probability": {"type": "number"}}}}}
         },
         {
           "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "projection"}}}}}},
@@ -441,7 +444,8 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. It is
         },
         {
           "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "stake"}}}}}},
-          "then": {"properties": {"entry": {"properties": {"stake_units": {"type": "null"}}}}}
+          "then": {"properties": {"entry": {"properties": {"stake_units": {"type": "null"}}}}},
+          "else": {"properties": {"entry": {"properties": {"stake_units": {"type": "number"}}}}}
         },
         {
           "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "edge"}}}}}},
@@ -452,7 +456,8 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. It is
               "entry": {"properties": {"edge": {"type": "null"}}},
               "current": {"properties": {"edge": {"type": "null"}}}
             }
-          }
+          },
+          "else": {"properties": {"entry": {"properties": {"edge": {"type": "number"}}}}}
         },
         {
           "not": {
@@ -551,7 +556,12 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. It is
               }
             }
           },
-          "then": {"properties": {"entry": {"properties": {"line": {"type": "number", "exclusiveMinimum": 0}}}}}
+          "then": {
+            "properties": {
+              "entry": {"properties": {"line": {"type": "number", "exclusiveMinimum": 0}}},
+              "current": {"properties": {"line": {"exclusiveMinimum": 0}}}
+            }
+          }
         },
         {
           "if": {
@@ -565,6 +575,39 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. It is
               "current": {"properties": {"line": {"type": "null"}}}
             }
           }
+        },
+        {
+          "if": {"properties": {"current": {"type": "null"}}},
+          "then": {"properties": {"edge_state": {"const": "unknown"}}}
+        },
+        {
+          "if": {"properties": {"edge_state": {"const": "suspended"}}},
+          "then": {
+            "properties": {
+              "current": {
+                "type": "object",
+                "properties": {"odds": {"type": "null"}, "line": {"type": "null"}, "edge": {"type": "null"}}
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "current": {"type": "object", "properties": {"odds": {"type": "null"}}},
+              "access": {"properties": {"hidden": {"not": {"contains": {"const": "odds"}}}}}
+            }
+          },
+          "then": {"properties": {"current": {"properties": {"line": {"type": "null"}, "edge": {"type": "null"}}}}}
+        },
+        {
+          "if": {
+            "anyOf": [
+              {"properties": {"status": {"enum": ["settled", "void"]}}},
+              {"properties": {"game": {"properties": {"state": {"const": "final"}}}}}
+            ]
+          },
+          "then": {"properties": {"access": {"properties": {"locked": {"const": false}, "hidden": {"maxItems": 0}}}}}
         }
       ],
       "additionalProperties": false
@@ -849,4 +892,4 @@ Everything else on this page is the target. Build against the provisional values
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day, after review: schema closed and given the selection, free-user and overlay\_key rules; free-user tie-break matches the agreed rule; which picks are locked, AU wording, refresh rules and the day-window vectors added | App team: pending. BFF: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day, after review: schema closed and given the selection, free-user and overlay\_key rules; free-user tie-break matches the agreed rule; which picks are locked, AU wording, refresh rules and the day-window vectors added. Second review: pulled-price nulls for current.line and current.edge; the schema now also checks both directions of the free-user groups, unknown edge state before any observation, suspended meaning no price, completed picks never locked, and positive current lines on totals and over/under props | App team: pending. BFF: pending |
