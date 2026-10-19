@@ -6,6 +6,7 @@ This log records the key design decisions (KDDs) behind the Edge Picks v4 contra
 | --- | --- | --- | --- | --- |
 | [KDD-001](#kdd-001-store-producer-pick-records-one-per-document-in-a-new-cosmos-container) | Store producer pick records one per document, in a new Cosmos container | Proposed | Bet engine, data engineering | 2026-10-19 |
 | [KDD-002](#kdd-002-old-and-new-app-versions-coexist-on-one-source-of-truth) | Old and new app versions coexist on one source of truth; legacy documents are derived from the new records under the same pick ids, never written independently | Proposed | BFF, app team, data engineering, bet engine | 2026-10-19 |
+| [KDD-003](#kdd-003-the-new-app-shows-legacy-and-v4-picks-through-one-response-shape) | The new app shows legacy and v4 picks through one response shape: the BFF translates legacy picks, marks each pick's era, and the app draws a full or a limited card | Proposed | BFF, app team (decide); product, data engineering | 2026-10-20 |
 
 Statuses: **Proposed** (written, not yet agreed), **Accepted** (every owner has agreed, with the date), **Superseded** (replaced by a later KDD, named in its status), **Rejected** (considered and turned down; kept so it is not proposed again without new facts).
 
@@ -176,7 +177,7 @@ Before this KDD is accepted, run in the dev Cosmos database set aside for the pa
 1. **Coexistence is open-ended.** No date is assumed by which users have moved to the new app. Every app version still supported keeps getting today's response shapes, with only the behaviour changes listed below, until its routes are retired under point 9.
 2. **One source of truth.** Producer pick records (KDD-001) are the only place a pick's values and results are decided. Everything an older build reads about picks, including results in `c-outcome`, is derived from them. Nothing writes pick values for older builds independently.
 3. **Version routing stays in the BFF.** Every request already carries `api_version`, and the BFF already serves staged content only from version 6 (`gate.ts`). The new Edge Picks screen calls `GET /v4/edge-picks`; older builds keep calling today's routes and receive today's shapes.
-4. **A server-side switch per league** turns the new screen's data on or off for new builds without an app release. Turning it off returns nothing from `/v4/edge-picks` for that league; older builds are unaffected either way.
+4. **A server-side switch per league** turns the new screen's data on or off for new builds without an app release. Turning it off returns nothing from `/v4/edge-picks` for that league; older builds are unaffected either way. *Amended by KDD-003: turning it off makes `/v4/edge-picks` serve that league's picks from the legacy documents as limited cards, instead of nothing.*
 5. **Each game has one source for life** (C1, amended). A league's games that start on or after its v4 start date are published as producer pick records, with derived legacy documents. Earlier games stay on today's pipeline and documents until they settle (C7). `/v4/edge-picks` reads those earlier games through C7's read-only adapters.
 6. **Stage A, derived legacy documents.** In the same Publish Engine write, the new records are projected into the legacy documents by one deterministic projection, the rules below, tested against fixtures. The documents are `game_prediction.top_picks` (Format A), `game_edge_picks`, `player_edge_picks`, `player_top_picks`, and the pick results in `c-outcome`.
    - Where a legacy document also carries other content (model predictions in `game_prediction`, the game result in `c-outcome`), the Publish Engine joins that input in and writes the whole document once. No other job writes those documents for v4 games.
@@ -326,6 +327,115 @@ The derived documents carry the same fields and words as today. Some behaviour f
   - `src/functions/service-bus-push-events.ts` (push consumer).
 - app-data dev 2b6f998: `databricks/publisher/transformations_library.py`, `nba/nba_wltp.py`, `nba/nba_ps.py` (legacy documents and ids)
 - `edgepicks-redesign/coexistence-cutover-plan.md`, Oct 17 (rules C1 to C9)
+
+---
+
+## KDD-003: The new app shows legacy and v4 picks through one response shape
+
+| | |
+| --- | --- |
+| Status | Proposed |
+| Date | 2026-10-20 |
+| Owners | BFF, app team (decide); product (card wording), data engineering (legacy document fields) (consulted) |
+| Contract affected | Snapshot API 4.0.0 draft: adds `era` to every pick, with null rules for legacy picks and an example. Producer pick record: none |
+| Supersedes | None. Amends KDD-002 point 4 (what the per-league switch does) and makes precise its point 5 (`/v4/edge-picks` reads earlier games through read-only adapters) |
+
+### Decision
+
+1. **The new app's Edge Picks screen shows every pick a user can see, from both eras.** It is not limited to picks published after a league's v4 start, so a league not yet on v4, or a day before its v4 start, still shows its picks.
+2. **The era is set per game, by the league's v4 start date** (KDD-002 point 5). A game that starts before it is a legacy-era game; its picks come from today's documents, which are never converted or backfilled. A game that starts on or after it is a v4-era game; its picks come from producer pick records.
+3. **The app gets one response shape.** `/v4/edge-picks` returns legacy-era picks translated by the BFF into the snapshot shape. The translation is read-only, follows the mapping below and keeps each league's meaning (C7, C8). The app never parses a legacy document or calls a legacy route for this screen.
+4. **Each pick carries `era`: `legacy` or `v4`.** The app picks its card from `era`, never from which fields happen to be null. A v4 pick gets the full card. A legacy pick gets a limited card: no live indicator, no "Edge holds above", no current price beside the entry price, and its price labelled as published.
+5. **A legacy pick fills what its documents hold, and nothing is invented.**
+   - Always set: id, sport, kind, game, selection, probability, entry price, stake, status, result.
+   - Computed by the BFF as for every pick: `entry.edge`, from probability and price, on the display basis.
+   - Always null: `current`, `edge_holds_above`, `overlay_key`, `action`. `edge_state` is `unknown`.
+   - `model.projection` is null in 4.0.
+   - A legacy pick that cannot be mapped into a valid snapshot pick is left out and reported, as for any pick that fails the schema.
+6. **The per-league switch falls back to legacy instead of going empty** (amends KDD-002 point 4). With a league's switch off, `/v4/edge-picks` serves that league's v4-era games from their derived legacy documents, as legacy picks. Turning v4 off for a league degrades its cards rather than emptying its screen.
+7. **Everything else is one code path.** Ordering, the day window, free-user locking (field groups and the leak rule, redacting the translated model, C4), caching and ETags apply to legacy and v4 picks alike. A day can mix both eras.
+8. **Saved ids keep working.** A legacy pick is served under its legacy id, which is what slips and follows saved before the league's v4 start hold. A v4-era pick has one id in both families (KDD-002 point 8).
+
+### Context
+
+- **The backend and the app are built at the same time,** and there is no safe big-bang switch. The backend writes producer pick records and legacy documents side by side (KDD-002), and the new app has to work whatever stage each league has reached.
+- **Past games stay in legacy format.** Nothing is backfilled (C7 of the Oct 17 plan, kept by KDD-002).
+- **The new screen's features are forward-looking.** Entry against current price, live edge state, "Edge holds above" and cancellation reasons need fields legacy documents do not have: no `current_*`, no `observed_at`, no edge basis or threshold (app-data dev 2b6f998).
+- **Leagues will reach v4 at different times.** NBA first. MLB and WNBA end their seasons on Nov 1 on legacy. NFL and EPL follow later, and more leagues are coming. On launch day most leagues on the new screen are still legacy.
+- **Legacy values are not entry values.** Today's documents are rebuilt on each engine run (KDD-002 Context). A legacy pick's price and time are those of the latest run, not of first publish, and a pick that disappeared on a line move is not in the documents at all.
+
+### Options considered
+
+| Option | Summary | Verdict |
+| --- | --- | --- |
+| A. Strictly forward-looking | The new screen shows only v4-era picks | Rejected: on launch day most leagues would show an empty screen, and a user who upgrades would lose the picks screen they had |
+| B. The app reads both | The new app calls today's routes for legacy picks and `/v4/edge-picks` for v4 picks | Rejected: two parsers and two locking paths in the app; today's routes do not apply the leak rule; every new league or format change touches the app |
+| C. Backfill legacy into producer records | Convert past documents into v4 records | Rejected: past games stay as they are. Legacy documents lack entry values and observations, so a backfill would invent them |
+| **D. BFF translates legacy into the snapshot shape, marked by `era`** | One response shape, two card variants | **Proposed** |
+
+### Why D
+
+- **One shape for the app.** Legacy support lives in one place, the BFF, which already reads every legacy document for older builds.
+- **The screen works for every league from launch,** whatever stage each league is at, and a league switched off falls back instead of emptying.
+- **Nothing is invented.** A legacy pick shows only what its documents hold, and the card says so.
+- **The free-user rules apply to every pick,** because locking redacts the translated model, not the document.
+
+### Mapping legacy picks into the snapshot shape
+
+| Snapshot field | Legacy source | Notes |
+| --- | --- | --- |
+| `id` | The legacy pick id | Unchanged, so saved slips and follows match |
+| `kind`, `selection` | NBA: `market`, `selection`, `line`, `stat`, `player_sk`. Format A: `type`, `bet_line` (T1 or T2), the `code` string, `bookmaker.position` | Home or away from the schedule's team\_1 and team\_2; the market and side per the producer page's mapping table |
+| `model.probability` | `probability` | A fraction in every league |
+| `entry.odds` | `bookmaker.bet_odds` | Decimal and American; Format A player picks write strings, parsed as numbers |
+| `entry.line` | NBA `line`; Format A `bookmaker.position` or the `code` | Per the line rule |
+| `entry.stake_units` | `bookmaker.stake_units` or `bet_stake` | |
+| `entry.source` | `bookmaker.name` | AU wording as for every pick |
+| `entry.edge` | Computed from probability and the price | On the display basis, as for every pick; the legacy `edge` field (NBA percentage points) is not used |
+| `picked_at` | The document's timestamp (`picks_updated_at` or `timestamp`) | The latest run's time, not first publish; the card shows no "picked at" time for legacy picks |
+| `status`, `result` | `pick_status` and `bet_outcome` | By the producer page's table "Values the BFF accepts until producers write this page's statuses" |
+| `current`, `edge_holds_above`, `overlay_key`, `action` | None | Null; `edge_state` is `unknown` |
+
+### Consequences
+
+**Positive**
+
+- The new app works from launch, for every league, at every stage of the migration.
+- Legacy history is shown without being converted or backfilled.
+- The app has one response shape and one locking path.
+
+**Negative, and what handles it**
+
+| Cost | Handling |
+| --- | --- |
+| The BFF maintains read-only translators for NBA and Format A picks | The same documents it already reads for older builds; fixture-tested per league and frozen once a league's legacy games have settled (C7) |
+| Legacy prices are the latest run's, not entry prices | The limited card labels the price as published and shows no picked-at time; product confirms the wording |
+| The edge on a legacy card is on the v4 display basis, so it can differ from what an older build shows (NBA shows percentage points) | One basis on the new screen; product confirms |
+| Picks that legacy documents dropped (line moves, re-runs) cannot be shown | They are not in the documents; nothing is invented |
+| The contract gains `era` | Added to the 4.0.0 draft before agreement, with its null rules in the schema |
+
+### Validation
+
+1. **Fixtures.** For each legacy family (NBA game picks, NBA player picks, Format A per league, game and player), the translation of each fixture validates against the snapshot schema and matches the mapping table.
+2. **Coverage.** For one day per league, every pick an older build shows also appears on the new screen as a legacy pick, or is in the BFF's unmappable-pick report.
+3. **Mixed day.** A day with legacy and v4 picks of the same sport is ordered by the usual rules, and each card follows its `era`.
+4. **Switch fallback.** With a v4 league's switch off, its v4-era games appear as legacy picks under the same ids, and turning the switch back on restores the full cards with no change of id.
+5. **Free users.** The leak rule and field groups hold on legacy picks; a locked legacy pick shows no hidden value.
+6. **Saved ids.** A slip saved in an older build before a league's v4 start opens in the new build on the same pick.
+
+### Open items
+
+- The limited card's wording for a published (not entry) price, and whether legacy picks show an edge at all (product).
+- Whether legacy player picks show a projection, joined from the prediction documents (product, BFF).
+- Each league's legacy fields and status words, for the fixtures (data engineering; shared with KDD-002).
+- The name `era`, and adding it to the snapshot contract (contract owner).
+
+### Sources
+
+- KDD-002 points 4, 5 and 8, and its Context (legacy documents rebuilt on each run; id handling)
+- `edgepicks-redesign/coexistence-cutover-plan.md`, Oct 17 (C4, C7, C8)
+- Snapshot API contract 4.0.0 draft (field null rules, field groups, ordering); producer pick record contract (mapping table, legacy status table)
+- app-data dev 2b6f998: `databricks/publisher/nba/nba_wltp.py`, `nba_ps.py`, `transformations_library.py` (legacy pick fields)
 
 ---
 
