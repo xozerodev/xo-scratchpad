@@ -165,22 +165,24 @@ Checked at app-data dev 2b6f998 and nba\_bet\_engine dev 3bfbb8b. NBA player pic
 
 ### Examples
 
-| # | Pick | pick\_kind | market | side | line | team\_sk | player\_sk | stat\_code |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| G1 | NBA: Celtics -4.5, Celtics at home | game | spread | home | -4.5 | Celtics | null | null |
-| G2 | NBA: over 224.5 total points | game | total | over | 224.5 | null | null | null |
-| G3 | NBA: Knicks to win, Knicks away | game | moneyline | away | null | Knicks | null | null |
-| G4 | EPL: draw | game | draw | draw | null | null | null | null |
-| G5 | EPL: both teams to score, no | game | btts | no | null | null | null | null |
-| G6 | EPL: home team to win (loses on a draw) | game | moneyline | home | null | home team | null | null |
-| G7 | NFL: underdog +6.5, underdog away | game | spread | away | 6.5 | underdog | null | null |
-| G8 | MLB: under 8.5 runs | game | total | under | 8.5 | null | null | null |
-| P1 | NBA: Jayson Tatum over 24.5 points | player | player\_prop | over | 24.5 | null | Tatum | pts |
-| P2 | NBA: under 9.5 rebounds | player | player\_prop | under | 9.5 | null | the player | reb |
-| P3 | NFL: over 14.5 receiving yards | player | player\_prop | over | 14.5 | null | the player | rec\_yds |
-| P4 | NFL: anytime touchdown | player | player\_prop | yes | null | null | the player | anytime\_td |
-| P5 | MLB: Aaron Judge over 0.5 home runs | player | player\_prop | over | 0.5 | null | Judge | home\_runs |
-| P6 | NBA: 25+ points milestone (supported, not produced today) | player | player\_prop | over | 24.5 | null | the player | pts |
+| # | Pick | pick\_kind | market | side | line | team\_sk | player\_sk | stat\_code | pick\_id |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| G1 | NBA: Celtics -4.5, Celtics at home | game | spread | home | -4.5 | Celtics | null | null | `{game_sk}\|spread_t1\|t1\|-4.5\|main\|full\|{region}` |
+| G2 | NBA: over 224.5 total points | game | total | over | 224.5 | null | null | null | `{game_sk}\|total_over\|over\|224.5\|main\|full\|{region}` |
+| G3 | NBA: Knicks to win, Knicks away | game | moneyline | away | null | Knicks | null | null | `{game_sk}\|h2h_t2\|t2\|null\|main\|full\|{region}` |
+| G4 | EPL: draw | game | draw | draw | null | null | null | null | `{game_sk}\|draw_draw\|draw\|null\|main\|full\|{region}` |
+| G5 | EPL: both teams to score, no | game | btts | no | null | null | null | null | `{game_sk}\|btts_no\|no\|null\|main\|full\|{region}` |
+| G6 | EPL: home team to win (loses on a draw) | game | moneyline | home | null | home team | null | null | `{game_sk}\|h2h_t1\|t1\|null\|main\|full\|{region}` |
+| G7 | NFL: underdog +6.5, underdog away | game | spread | away | 6.5 | underdog | null | null | `{game_sk}\|spread_t2\|t2\|6.5\|main\|full\|{region}` |
+| G8 | MLB: under 8.5 runs | game | total | under | 8.5 | null | null | null | `{game_sk}\|total_under\|under\|8.5\|main\|full\|{region}` |
+| P1 | NBA: Jayson Tatum over 24.5 points | player | player\_prop | over | 24.5 | null | Tatum | pts | `{game_sk}\|{player_sk}\|pts\|player_over\|24.5\|main\|full\|{region}` |
+| P2 | NBA: under 9.5 rebounds | player | player\_prop | under | 9.5 | null | the player | reb | `{game_sk}\|{player_sk}\|reb\|player_under\|9.5\|main\|full\|{region}` |
+| P3 | NFL: over 14.5 receiving yards | player | player\_prop | over | 14.5 | null | the player | rec\_yds | `{game_sk}\|{player_sk}\|rec_yds\|player_over\|14.5\|main\|full\|{region}` |
+| P4 | NFL: anytime touchdown | player | player\_prop | yes | null | null | the player | anytime\_td | `{game_sk}\|{player_sk}\|anytime_td\|player_yes\|null\|main\|full\|{region}` |
+| P5 | MLB: Aaron Judge over 0.5 home runs | player | player\_prop | over | 0.5 | null | Judge | home\_runs | `{game_sk}\|{player_sk}\|home_runs\|player_over\|0.5\|main\|full\|{region}` |
+| P6 | NBA: 25+ points milestone (supported, not produced today) | player | player\_prop | over | 24.5 | null | the player | pts | `{game_sk}\|{player_sk}\|pts\|player_over\|24.5\|main\|full\|{region}` |
+
+In these examples the home team is the schedule's team\_1; the slot in a real id always comes from the schedule ("Pick id"). A milestone (P6) is written as over k − 0.5, so its id has the over form, not NBA's `player_milestone` form, which 4.x does not use.
 
 Two complete records, both valid against the schema below. P1, an NBA player pick on the probability basis (p 0.6565 at 1.87 gives 0.6565 − 1/1.87 = 0.1217), not yet observed by the monitor:
 
@@ -240,7 +242,7 @@ Every producer builds pick\_id with one formula: the NBA canonical id (NBA 2026 
 | market | The market token: `h2h` for moneyline; `spread`, `total`, `draw` and `btts` as the record's market. A new market adds its token here, in lowercase letters and digits only, with no `_` or `\|` |
 | selection | `t1` or `t2` for the backed team: its slot in the schedule (team\_1 or team\_2), found from team\_sk, never from home or away. Otherwise the record's side: `over`, `under`, `yes`, `no` or `draw` |
 | selection, multi-way (reserved) | `k{competitor_sk}` for one team, player or pair among several (a tournament winner), and `p{player_sk}` for one player among a game's players (first touchdown scorer). The record cannot yet carry these picks; the side value and competitor field they need come in a 4.x minor version with the first such market |
-| side | The record's side, for player props: `over`, `under`, `yes` or `no` |
+| side | The record's side, for player props: `over`, `under`, `yes` or `no`. Milestones are over k − 0.5, so NBA's `player_milestone` form is not used in 4.x |
 | line | `null` when the record's line is null. Otherwise the shortest decimal that reads back as the same number, with at least one digit after the point: `24.5`, `-4.5`, `3.0`, `220.0`, `-0.25`; zero is `0.0`, never `-0.0`. This is what Python's `repr` of a float and Spark's cast of a double to string both write |
 | `main`, `full` | Fixed in 4.x. The record has no variant or period, so an alternate line is the same pick as a main line at that line, and full game is the only period |
 | `r{n}` | Only on a re-issue: the engine recommends a selection again after its earlier pick in that region was cancelled or withdrawn. The first re-issue is `r2`, then `r3`. A first issue has no suffix |
@@ -551,4 +553,4 @@ Fields still to add, by producer: sport (all); pick\_id built by the formula und
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market. After review: schema closed, with the observation, pulled-price, source, game-pick, line and projection rules; pausing never removes picks; 5-minute observation rule; nba\_bet\_engine and live-odds observations moved to 3bfbb8b and 30e05ce. Second review: current\_line must also be positive on totals and over/under props. KDD review: sport added; pick\_id unique across regions and sports, with a restricted character set; the schema validates the record, not the stored document. Pick id formula: the NBA canonical id for every producer, with one line spelling, a re-issue suffix and reserved multi-way selections; the schema checks its shape; the EPL example id rewritten | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market. After review: schema closed, with the observation, pulled-price, source, game-pick, line and projection rules; pausing never removes picks; 5-minute observation rule; nba\_bet\_engine and live-odds observations moved to 3bfbb8b and 30e05ce. Second review: current\_line must also be positive on totals and over/under props. KDD review: sport added; pick\_id unique across regions and sports, with a restricted character set; the schema validates the record, not the stored document. Pick id formula: the NBA canonical id for every producer, with one line spelling, a re-issue suffix and reserved multi-way selections; the schema checks its shape; the EPL example id rewritten; the examples table shows each pick's id | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |
