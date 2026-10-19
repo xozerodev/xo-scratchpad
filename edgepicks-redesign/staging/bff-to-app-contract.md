@@ -775,7 +775,7 @@ Three picks for a US subscriber with tz\_offset -4: a settled player prop that w
   "generated_at": "2026-10-22T19:00:03.120Z",
   "picks": [
     {
-      "id": "40021717850|50001234|pts|over|26.5|main|full|us",
+      "id": "40021717850|50001234|pts|player_over|26.5|main|full|us",
       "overlay_key": null,
       "sport": "nba",
       "kind": "player",
@@ -797,7 +797,7 @@ Three picks for a US subscriber with tz\_offset -4: a settled player prop that w
       "access": {"locked": false, "hidden": []}
     },
     {
-      "id": "40021717861|moneyline_t2|t2|null|main|full|us",
+      "id": "40021717861|h2h_t2|t2|null|main|full|us",
       "overlay_key": null,
       "sport": "nba",
       "kind": "game",
@@ -892,4 +892,4 @@ Everything else on this page is the target. Build against the provisional values
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day, after review: schema closed and given the selection, free-user and overlay\_key rules; free-user tie-break matches the agreed rule; which picks are locked, AU wording, refresh rules and the day-window vectors added. Second review: pulled-price nulls for current.line and current.edge; the schema now also checks both directions of the free-user groups, unknown edge state before any observation, suspended meaning no price, completed picks never locked, and positive current lines on totals and over/under props. KDD review: id is the producer's pick\_id, the same id older builds see | App team: pending. BFF: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day, after review: schema closed and given the selection, free-user and overlay\_key rules; free-user tie-break matches the agreed rule; which picks are locked, AU wording, refresh rules and the day-window vectors added. Second review: pulled-price nulls for current.line and current.edge; the schema now also checks both directions of the free-user groups, unknown edge state before any observation, suspended meaning no price, completed picks never locked, and positive current lines on totals and over/under props. KDD review: id is the producer's pick\_id, the same id older builds see; the example ids follow the producer contract's pick id formula | App team: pending. BFF: pending |

@@ -44,7 +44,7 @@ Every Edge Pick is stored as one typed record per pick per region, with the same
 | void | The game was postponed or cancelled, or the market voided | void | set when known, usually game\_void | BFF serves it as void |
 | withdrawn | Published in error | null | optional | BFF never serves it; the monitor stops |
 
-Reason codes (Provisional): probability\_moved (the model no longer backs the pick), market\_moved (the price moved past the edge), lineup\_change, withdrawn, game\_void (the game or market was voided). A line move alone is never a reason to cancel: the pick stays open and its edge\_status becomes closed.
+Reason codes (Provisional): probability\_moved (the model no longer backs the pick), market\_moved (the price moved past the edge), lineup\_change, withdrawn, game\_void (the game or market was voided). A line move alone is never a reason to cancel: the pick stays open and its edge\_status becomes closed. Neither is an edge\_status on its own: the engine decides. "Example records" shows a cancelled pick.
 
 ### Edge basis, threshold and formulas
 
@@ -477,9 +477,11 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. It is
 }
 ```
 
-## Example record
+## Example records
 
-An open NBA spread selected on the expected-value basis with threshold 0: entry 2.0000 at p 0.55 gives entry\_edge 0.1000; the latest price 1.9500 on the same line gives current\_edge 0.0725, above the midpoint 1.9091, so edge\_status is live.
+The three picks of the snapshot API's example "A subscriber's day", as the producer writes them. All three are on the expected-value basis with threshold 0, so b = 1 / p.
+
+**An open game pick.** An NBA spread: entry 2.0000 at p 0.55 gives entry\_edge 0.1000; the latest price 1.9500 on the same line gives current\_edge 0.0725, above the midpoint 1.9091, so edge\_status is live.
 
 ```json
 {
@@ -502,6 +504,58 @@ An open NBA spread selected on the expected-value basis with threshold 0: entry 
   "current_edge": 0.0725, "edge_status": "live",
   "rec_action": null,
   "pick_status": "open", "status_reason": null, "outcome": null
+}
+```
+
+**A cancelled game pick.** The Lakers, away at the Nuggets, on the moneyline: entry 2.2500 at p 0.48 gives entry\_edge 0.0800 and b 2.0833. Before the game the model stopped backing the pick, so the engine cancelled it with reason probability\_moved. The price had also eased to 2.0500, below b, so its last edge\_status is closed with current\_edge −0.0160; that is an observation, not the reason for the cancellation. Everything frozen keeps its first-publish value, and the current\_ fields keep the last observation before the cancellation, because the monitor stops watching a cancelled pick. outcome stays null, and the pick never counts in results.
+
+```json
+{
+  "schema_version": "4.0.0",
+  "pick_id": "40021717861|h2h_t2|t2|null|main|full|us",
+  "region": "us",
+  "sport": "nba",
+  "game_sk": 40021717861,
+  "pick_kind": "game", "market": "moneyline", "side": "away", "line": null,
+  "team_sk": 40000013, "player_sk": null, "stat_code": null,
+  "probability": 0.48, "projection_value": null, "projection_unit": null,
+  "pick_date_time": "2026-10-22T14:02:10.500Z",
+  "entry_decimal_odds": 2.25, "entry_american_odds": 125, "entry_edge": 0.08,
+  "edge_basis": "ev", "edge_threshold": 0,
+  "stake_units": 1,
+  "odds_source_kind": "bookmaker", "entry_bookmaker_id": "draftkings",
+  "current_decimal_odds": 2.05, "current_american_odds": 105, "current_line": null,
+  "current_odds_source_kind": "bookmaker", "current_bookmaker_id": "draftkings",
+  "observed_at": "2026-10-22T18:41:00.000Z", "is_closing": false,
+  "current_edge": -0.016, "edge_status": "closed",
+  "rec_action": null,
+  "pick_status": "cancelled", "status_reason": "probability_moved", "outcome": null
+}
+```
+
+**A settled player pick.** Tyrese Maxey over 26.5 points: entry 1.8696 at p 0.60 gives entry\_edge 0.1218. The line had moved to 27.5 by the last observation before the game, so that observation is the closing one, current\_edge is null and edge\_status is closed. The pick stayed on its entry line (a line move never cancels a pick), was graded on its entry odds and won.
+
+```json
+{
+  "schema_version": "4.0.0",
+  "pick_id": "40021717850|50001234|pts|player_over|26.5|main|full|us",
+  "region": "us",
+  "sport": "nba",
+  "game_sk": 40021717850,
+  "pick_kind": "player", "market": "player_prop", "side": "over", "line": 26.5,
+  "team_sk": null, "player_sk": 50001234, "stat_code": "pts",
+  "probability": 0.6, "projection_value": 28.3, "projection_unit": "points",
+  "pick_date_time": "2026-10-22T13:10:44.002Z",
+  "entry_decimal_odds": 1.8696, "entry_american_odds": -115, "entry_edge": 0.1218,
+  "edge_basis": "ev", "edge_threshold": 0,
+  "stake_units": 2,
+  "odds_source_kind": "bookmaker", "entry_bookmaker_id": "draftkings",
+  "current_decimal_odds": 1.9091, "current_american_odds": -110, "current_line": 27.5,
+  "current_odds_source_kind": "bookmaker", "current_bookmaker_id": "draftkings",
+  "observed_at": "2026-10-22T15:59:30.000Z", "is_closing": true,
+  "current_edge": null, "edge_status": "closed",
+  "rec_action": null,
+  "pick_status": "settled", "status_reason": null, "outcome": "won"
 }
 ```
 
@@ -553,4 +607,4 @@ Fields still to add, by producer: sport (all); pick\_id built by the formula und
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market. After review: schema closed, with the observation, pulled-price, source, game-pick, line and projection rules; pausing never removes picks; 5-minute observation rule; nba\_bet\_engine and live-odds observations moved to 3bfbb8b and 30e05ce. Second review: current\_line must also be positive on totals and over/under props. KDD review: sport added; pick\_id unique across regions and sports, with a restricted character set; the schema validates the record, not the stored document. Pick id formula: the NBA canonical id for every producer, with one line spelling, a re-issue suffix and reserved multi-way selections; the schema checks its shape; the EPL example id rewritten; the examples table shows each pick's id | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market. After review: schema closed, with the observation, pulled-price, source, game-pick, line and projection rules; pausing never removes picks; 5-minute observation rule; nba\_bet\_engine and live-odds observations moved to 3bfbb8b and 30e05ce. Second review: current\_line must also be positive on totals and over/under props. KDD review: sport added; pick\_id unique across regions and sports, with a restricted character set; the schema validates the record, not the stored document. Pick id formula: the NBA canonical id for every producer, with one line spelling, a re-issue suffix and reserved multi-way selections; the schema checks its shape; the EPL example id rewritten; the examples table shows each pick's id; example records for a cancelled game pick and a settled player pick, matching the snapshot API's example | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |
