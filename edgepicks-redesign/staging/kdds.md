@@ -5,6 +5,7 @@ This log records the key design decisions (KDDs) behind the Edge Picks v4 contra
 | KDD | Decision | Status | Owners | Date |
 | --- | --- | --- | --- | --- |
 | [KDD-001](#kdd-001-store-producer-pick-records-one-per-document-in-a-new-cosmos-container) | Store producer pick records one per document, in a new Cosmos container | Proposed | Bet engine, data engineering | 2026-10-19 |
+| [KDD-002](#kdd-002-old-and-new-app-versions-coexist-on-one-source-of-truth) | Old and new app versions coexist on one source of truth; legacy documents are derived from the new records, never written independently | Proposed | BFF, app team, data engineering, bet engine | 2026-10-19 |
 
 Statuses: **Proposed** (written, not yet agreed), **Accepted** (every owner has agreed, with the date), **Superseded** (replaced by a later KDD, named in its status), **Rejected** (considered and turned down; kept so it is not proposed again without new facts).
 
@@ -30,13 +31,14 @@ Statuses: **Proposed** (written, not yet agreed), **Accepted** (every owner has 
    - The **BFF reads Cosmos once per region and day into a shared cache**, never once per app request, and applies each user's locking in memory.
    - The **monitor writes an observation only when the price, line or edge state changed**, and at most every 5 minutes per pick.
    - **`pick_id` must not contain `/`, `\`, `?` or `#`**, the characters Cosmos does not allow in a document id.
+6. This container is the **only source of pick values**. The documents older app versions read are derived from it, as set out in KDD-002.
 
 ### Context
 
 - **Today's layout** (app-data dev 2b6f998): one document per game per pick type (`nba|game_edge_picks|<game_sk>`, `nba|player_edge_picks|<game_sk>`), partitioned on `/game_sk`, with a region map inside the document. Prediction documents share the same containers. Every Publish Engine run replaces the whole document.
 - **The whole-document replace is what drops picks.** A pick the engine does not produce on a later run disappears from the document. That breaks the contract's persistence rule: once published, a pick stays until it is settled or void.
 - **The contract has one writer.** Only the Publish Engine writes pick documents, and the monitor's observations reach them through it within 5 minutes. With one document per game, every price change on any pick rewrites the whole game document, and concurrent updates to one game conflict.
-- **The current app must keep working until cutover.** The store build is pinned to API version 5 and reads the existing documents.
+- **Older app versions keep working for as long as they are supported**, which is open-ended (KDD-002). The store build sends API version 5 and reads the existing documents.
 - **Scale is growing.** More than 10 leagues are planned, so 1,000 or more pick records a day (a record is one pick in one region), and plausibly 5,000.
 
 ### Options considered
@@ -53,7 +55,7 @@ Statuses: **Proposed** (written, not yet agreed), **Accepted** (every owner has 
 - **Persistence holds by construction.** Upserting one pick cannot drop its siblings. A pick leaves only by changing its own status to cancelled, void or withdrawn.
 - **Writes are about 7 times cheaper** than rewriting a game document on every change (cost table below), and writes for different picks never contend.
 - **The schema applies directly.** One document is one producer record, so producer CI validates documents against the contract's JSON Schema as they are.
-- **Old and new run side by side.** The current app keeps reading the old containers untouched. The Publish Engine writes both during the transition, and rollback means ignoring the new container.
+- **Old and new app versions are served side by side.** Older builds keep reading the existing containers, whose pick documents are derived from the new records in the same Publish Engine run (KDD-002). Turning the new screen off for new builds needs no data change.
 - **It fits the dev-isolation rule**, which already asks for a separate Cosmos database for the parallel setup in dev.
 
 ### Cost and performance
@@ -99,15 +101,15 @@ Rebuilding the shared cache only when picks have changed, rather than every 60 s
 - The persistence and one-writer rules hold without depending on every engine run behaving.
 - Write cost and contention fall by about 7 times compared with game documents.
 - Producer CI validates stored documents directly against the contract schema.
-- Coexistence with the current app is a matter of dual-writing, not migrating in place.
+- Older app versions keep working without a migration in place (KDD-002).
 
 **Negative, and what handles it**
 
 | Cost | Handling |
 | --- | --- |
 | The BFF needs a new read path (query instead of point reads) | Built once, behind the shared region-day cache |
-| The Publish Engine writes both layouts until cutover | Time-boxed by the dev-isolation rule's end date |
-| My Picks entries saved against old ids need mapping if the pick id format changes | Decided together with the open pick-id format decision |
+| The Publish Engine also writes the legacy documents, derived from the new records, for as long as any supported app version reads them | The legacy writes cost what they cost today, so nothing is added; they are retired league by league and route by route under KDD-002 |
+| My Picks entries and follows saved in an older build carry legacy ids | Each record carries the ids older builds saved (`legacy_pick_ids`, KDD-002) |
 | Per-request Cosmos reads would be expensive | Guardrail 1: the shared cache is part of this decision |
 | Frequent monitor updates add write volume | Guardrail 2: write on change only, at most every 5 minutes |
 
