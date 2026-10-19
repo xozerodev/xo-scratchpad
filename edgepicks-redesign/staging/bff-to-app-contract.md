@@ -52,7 +52,7 @@ On success:
 
 - 200 with the body defined on this page. Every pick validates against the schema below; a pick that would not is left out and reported to the BFF's monitoring, and the rest are served.
 - Picks are sorted by game.starts\_at ascending, then entry.edge descending with nulls last, then id ascending. The app may re-sort for display.
-- An ETag header covers the whole body except generated\_at. A request whose If-None-Match matches gets 304 with no body, and the app keeps its copy. When to refetch is the app's choice; an unchanged day costs a 304.
+- An ETag header covers the whole body except generated\_at. A request whose If-None-Match matches gets 304 with no body, and the app keeps its copy. While the screen is visible, the app requests the snapshot at most once every 60 seconds, always with If-None-Match. When the user's entitlement changes, it requests at once, and it holds no overlay subscription for a pick whose overlay\_key is null.
 - The response is for one user. Shared caches must not store it.
 
 | HTTP | Body | When | The app |
@@ -91,7 +91,7 @@ Every field below is always present; "Null when" lists the only cases it may be 
 | model.projection | Projection | projection hidden, or the market has no projection | The model's projected stat or score |
 | entry.odds | Odds | odds hidden | Price at first publish. Never changes |
 | entry.line | number | the market has no line, or selection hidden | Line at first publish, per the line rule. Never changes |
-| entry.edge | number | edge hidden, or the producer sent none | Edge at entry: model.probability × entry decimal − 1 (Provisional basis). Never changes |
+| entry.edge | number | edge hidden. Otherwise always set: the BFF computes it from model.probability and the entry price | Edge at entry: model.probability × entry decimal − 1 (Provisional basis). Never changes |
 | entry.stake\_units | number ≥ 0 | stake hidden | Recommended stake in units. Never changes |
 | entry.source | OddsSource | never | Where the entry price came from. Never hidden |
 | current | object | no market observation yet | The market as last observed. Once the game starts, the last observation before the start |
@@ -173,10 +173,16 @@ The BFF hides whole field groups for a user who may not see them; the hidden fie
 | stake | entry.stake\_units | show\_stake |
 | edge | entry.edge, current.edge, action; edge\_state is set to unknown | show\_xo\_edge |
 
-- Probability, odds and edge give each other away: any two give the third. So either none of the three is hidden or at least two are. When the flags would hide exactly one, the BFF also hides the next in the order edge, probability, odds and lists both.
+- Probability, odds and edge give each other away: any two give the third. So either none of the three is hidden or at least two are. When the flags would hide exactly one, the BFF also hides edge if that one is probability or odds, and probability if that one is edge, and lists both.
 - overlay\_key is null when selection, odds or edge is hidden, because the overlay carries the line, the price and the edge state.
 - entry.source and current.source are in no group and are never hidden.
 - The app shows a lock in place of each hidden field, never derives a hidden value from the visible ones, and ignores any live update to a field in a hidden group.
+
+Which picks are locked. Subscribers see every pick in full. For a free user, completed picks (status settled or void, or game.state final) are always unlocked. In each sport whose freemium setting is enabled, the top\_pick\_count picks with the highest model probability are also unlocked, counting only picks whose probability is within top\_pick\_prob\_min to top\_pick\_prob\_max (inclusive) when both are set; completed picks are ranked too and keep their slots. Every other pick is locked. Example: NFL with top\_pick\_count 1 and range 0.55 to 0.95, open picks at 0.97, 0.80 and 0.70: only the 0.80 pick is unlocked.
+
+### Region wording
+
+While AU picks carry US prices, the BFF presents every AU source (entry.source and current.source) as kind market\_average, id null, name "Avg. Odds", and words moneyline as "Win" in selection.label. US users see the bookmaker's name and "Moneyline". The app shows these strings as sent.
 
 ### Edge state
 
@@ -265,9 +271,16 @@ Derived values.
 | D-10 | 1 unit, standard bet $10, entry −110, won | bet size $10.00, payout $19.09 |
 | D-11 | Producer on probability basis sends edge 5.0 (percentage points), p 0.55, entry 2.0000 | entry.edge 0.1000 |
 
+Day window.
+
+| Case | Request | Game starts | Served |
+| --- | --- | --- | --- |
+| W-1 | date 2026-10-21, tz\_offset 11 | 2026-10-21T12:30:00Z | Yes: the window is 2026-10-20T13:00Z to 2026-10-21T13:00Z |
+| W-2 | date 2026-10-21, tz\_offset 11 | 2026-10-21T13:30:00Z | No |
+
 ## JSON Schema
 
-JSON Schema draft 2020-12, complete: it references nothing outside itself. Both the BFF's tests and the app's tests validate against it. Two rules are checked by tests rather than the schema: decimals have at most 4 places (multipleOf on floats gives different answers in different validators), and the field-group rules under "Free users and locked fields".
+JSON Schema draft 2020-12, complete: it references nothing outside itself. It is closed (no field it does not define) and encodes the per-market selection rules, the free-user rules and the overlay\_key rule, so the BFF's CI rejects any response that breaks them. The app does not validate at runtime: it ignores fields it does not know, so a later 4.x that adds a field never breaks an older app. One rule stays a test rather than a keyword: decimals carry at most 4 places, because multipleOf on floats gives different answers in different validators.
 
 ```json
 {
@@ -287,8 +300,7 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
   "$defs": {
     "Pick": {
       "type": "object",
-      "required": ["id", "overlay_key", "sport", "kind", "game", "selection", "picked_at", "model", "entry",
-                   "current", "edge_holds_above", "edge_state", "action", "status", "status_reason", "result", "access"],
+      "required": ["id", "overlay_key", "sport", "kind", "game", "selection", "picked_at", "model", "entry", "current", "edge_holds_above", "edge_state", "action", "status", "status_reason", "result", "access"],
       "properties": {
         "id": {"type": "string", "minLength": 1},
         "overlay_key": {"type": ["string", "null"], "pattern": "^[^.$#\\[\\]/\\x00-\\x1f\\x7f]+$"},
@@ -301,9 +313,10 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
           "type": "object",
           "required": ["probability", "projection"],
           "properties": {
-            "probability": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+            "probability": {"type": ["number", "null"], "exclusiveMinimum": 0, "exclusiveMaximum": 1},
             "projection": {"oneOf": [{"$ref": "#/$defs/Projection"}, {"type": "null"}]}
-          }
+          },
+          "additionalProperties": false
         },
         "entry": {
           "type": "object",
@@ -314,7 +327,8 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
             "edge": {"type": ["number", "null"]},
             "stake_units": {"type": ["number", "null"], "minimum": 0},
             "source": {"$ref": "#/$defs/OddsSource"}
-          }
+          },
+          "additionalProperties": false
         },
         "current": {
           "oneOf": [
@@ -329,13 +343,14 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
                 "source": {"oneOf": [{"$ref": "#/$defs/OddsSource"}, {"type": "null"}]},
                 "observed_at": {"type": "string", "format": "date-time"},
                 "is_closing": {"type": "boolean"}
-              }
+              },
+              "additionalProperties": false
             }
           ]
         },
         "edge_holds_above": {"oneOf": [{"$ref": "#/$defs/Odds"}, {"type": "null"}]},
         "edge_state": {"enum": ["live", "narrowing", "closed", "suspended", "unknown"]},
-        "action": {"enum": ["play", "watch", "pass", null]},
+        "action": {"type": "null"},
         "status": {"enum": ["open", "awaiting_result", "cancelled", "settled", "void"]},
         "status_reason": {
           "oneOf": [
@@ -346,7 +361,8 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
               "properties": {
                 "code": {"enum": ["probability_moved", "market_moved", "lineup_change", "withdrawn", "game_void"]},
                 "message": {"type": "string", "minLength": 1}
-              }
+              },
+              "additionalProperties": false
             }
           ]
         },
@@ -361,22 +377,197 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
               "uniqueItems": true,
               "items": {"enum": ["selection", "odds", "probability", "projection", "stake", "edge"]}
             }
-          }
+          },
+          "additionalProperties": false
         }
       },
       "allOf": [
-        {"if": {"properties": {"status": {"const": "settled"}}},
-         "then": {"properties": {"result": {"enum": ["won", "lost", "push"]}}}},
-        {"if": {"properties": {"status": {"const": "void"}}},
-         "then": {"properties": {"result": {"const": "void"}}}},
-        {"if": {"properties": {"status": {"enum": ["open", "awaiting_result", "cancelled"]}}},
-         "then": {"properties": {"result": {"const": null}}}},
-        {"if": {"properties": {"status": {"enum": ["open", "awaiting_result", "settled"]}}},
-         "then": {"properties": {"status_reason": {"const": null}}}},
-        {"if": {"properties": {"access": {"properties": {"hidden": {"minItems": 1}}}}},
-         "then": {"properties": {"access": {"properties": {"locked": {"const": true}}}}},
-         "else": {"properties": {"access": {"properties": {"locked": {"const": false}}}}}}
-      ]
+        {
+          "if": {"properties": {"status": {"const": "settled"}}},
+          "then": {"properties": {"result": {"enum": ["won", "lost", "push"]}}}
+        },
+        {
+          "if": {"properties": {"status": {"const": "void"}}},
+          "then": {"properties": {"result": {"const": "void"}}}
+        },
+        {
+          "if": {"properties": {"status": {"enum": ["open", "awaiting_result", "cancelled"]}}},
+          "then": {"properties": {"result": {"const": null}}}
+        },
+        {
+          "if": {"properties": {"status": {"enum": ["open", "awaiting_result", "settled"]}}},
+          "then": {"properties": {"status_reason": {"const": null}}}
+        },
+        {
+          "if": {"properties": {"access": {"properties": {"hidden": {"minItems": 1}}}}},
+          "then": {"properties": {"access": {"properties": {"locked": {"const": true}}}}},
+          "else": {"properties": {"access": {"properties": {"locked": {"const": false}}}}}
+        },
+        {
+          "if": {"properties": {"status": {"not": {"const": "open"}}}},
+          "then": {"properties": {"overlay_key": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "selection"}}}}}},
+          "then": {
+            "properties": {
+              "selection": {"type": "null"},
+              "overlay_key": {"type": "null"},
+              "entry": {"properties": {"line": {"type": "null"}}},
+              "current": {"properties": {"line": {"type": "null"}}}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "odds"}}}}}},
+          "then": {
+            "properties": {
+              "overlay_key": {"type": "null"},
+              "edge_holds_above": {"type": "null"},
+              "entry": {"properties": {"odds": {"type": "null"}}},
+              "current": {"properties": {"odds": {"type": "null"}}}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "probability"}}}}}},
+          "then": {
+            "properties": {"edge_holds_above": {"type": "null"}, "model": {"properties": {"probability": {"type": "null"}}}}
+          }
+        },
+        {
+          "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "projection"}}}}}},
+          "then": {"properties": {"model": {"properties": {"projection": {"type": "null"}}}}}
+        },
+        {
+          "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "stake"}}}}}},
+          "then": {"properties": {"entry": {"properties": {"stake_units": {"type": "null"}}}}}
+        },
+        {
+          "if": {"properties": {"access": {"properties": {"hidden": {"contains": {"const": "edge"}}}}}},
+          "then": {
+            "properties": {
+              "overlay_key": {"type": "null"},
+              "edge_state": {"const": "unknown"},
+              "entry": {"properties": {"edge": {"type": "null"}}},
+              "current": {"properties": {"edge": {"type": "null"}}}
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "access": {
+                "properties": {
+                  "hidden": {
+                    "allOf": [
+                      {"contains": {"const": "probability"}},
+                      {"not": {"contains": {"const": "odds"}}},
+                      {"not": {"contains": {"const": "edge"}}}
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "access": {
+                "properties": {
+                  "hidden": {
+                    "allOf": [
+                      {"contains": {"const": "odds"}},
+                      {"not": {"contains": {"const": "probability"}}},
+                      {"not": {"contains": {"const": "edge"}}}
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "not": {
+            "properties": {
+              "access": {
+                "properties": {
+                  "hidden": {
+                    "allOf": [
+                      {"contains": {"const": "edge"}},
+                      {"not": {"contains": {"const": "probability"}}},
+                      {"not": {"contains": {"const": "odds"}}}
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "player"}}},
+          "then": {
+            "properties": {"selection": {"anyOf": [{"type": "null"}, {"properties": {"market": {"const": "player_prop"}}}]}}
+          },
+          "else": {
+            "properties": {
+              "selection": {"anyOf": [{"type": "null"}, {"properties": {"market": {"not": {"const": "player_prop"}}}}]}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selection": {
+                "properties": {"market": {"enum": ["moneyline", "draw", "btts"]}},
+                "required": ["market"],
+                "type": "object"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "entry": {"properties": {"line": {"type": "null"}}},
+              "current": {"properties": {"line": {"type": "null"}}}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "selection": {"properties": {"market": {"const": "spread"}}, "required": ["market"], "type": "object"}
+            }
+          },
+          "then": {"properties": {"entry": {"properties": {"line": {"type": "number"}}}}}
+        },
+        {
+          "if": {
+            "properties": {
+              "selection": {
+                "properties": {"market": {"enum": ["total", "player_prop"]}, "side": {"enum": ["over", "under"]}},
+                "required": ["market"],
+                "type": "object"
+              }
+            }
+          },
+          "then": {"properties": {"entry": {"properties": {"line": {"type": "number", "exclusiveMinimum": 0}}}}}
+        },
+        {
+          "if": {
+            "properties": {
+              "selection": {"properties": {"side": {"enum": ["yes", "no"]}}, "required": ["side"], "type": "object"}
+            }
+          },
+          "then": {
+            "properties": {
+              "entry": {"properties": {"line": {"type": "null"}}},
+              "current": {"properties": {"line": {"type": "null"}}}
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
     },
     "Game": {
       "type": "object",
@@ -388,15 +579,20 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
         "state": {"enum": ["upcoming", "live", "delayed", "interrupted", "final", "postponed", "cancelled"]},
         "home": {"$ref": "#/$defs/Team"},
         "away": {"$ref": "#/$defs/Team"}
-      }
+      },
+      "additionalProperties": false
     },
     "Team": {
       "type": "object",
       "required": ["id", "name", "short_name", "abbreviation", "image_code"],
       "properties": {
-        "id": {"type": "string"}, "name": {"type": "string"}, "short_name": {"type": "string"},
-        "abbreviation": {"type": "string"}, "image_code": {"type": "string"}
-      }
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "short_name": {"type": "string"},
+        "abbreviation": {"type": "string"},
+        "image_code": {"type": "string"}
+      },
+      "additionalProperties": false
     },
     "Selection": {
       "type": "object",
@@ -407,8 +603,12 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
         "stat": {
           "oneOf": [
             {"type": "null"},
-            {"type": "object", "required": ["code", "label"],
-             "properties": {"code": {"type": "string"}, "label": {"type": "string"}}}
+            {
+              "type": "object",
+              "required": ["code", "label"],
+              "properties": {"code": {"type": "string"}, "label": {"type": "string"}},
+              "additionalProperties": false
+            }
           ]
         },
         "side": {"enum": ["home", "away", "over", "under", "yes", "no", "draw"]},
@@ -416,21 +616,85 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
         "player": {
           "oneOf": [
             {"type": "null"},
-            {"type": "object", "required": ["id", "name", "team_id"],
-             "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "team_id": {"type": "string"}}}
+            {
+              "type": "object",
+              "required": ["id", "name", "team_id"],
+              "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "team_id": {"type": "string"}},
+              "additionalProperties": false
+            }
           ]
         }
-      }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"market": {"enum": ["moneyline", "spread"]}}},
+          "then": {
+            "properties": {
+              "side": {"enum": ["home", "away"]},
+              "team": {"type": "object"},
+              "player": {"type": "null"},
+              "stat": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"market": {"const": "total"}}},
+          "then": {
+            "properties": {
+              "side": {"enum": ["over", "under"]},
+              "team": {"type": "null"},
+              "player": {"type": "null"},
+              "stat": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"market": {"const": "draw"}}},
+          "then": {
+            "properties": {
+              "side": {"const": "draw"},
+              "team": {"type": "null"},
+              "player": {"type": "null"},
+              "stat": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"market": {"const": "btts"}}},
+          "then": {
+            "properties": {
+              "side": {"enum": ["yes", "no"]},
+              "team": {"type": "null"},
+              "player": {"type": "null"},
+              "stat": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"market": {"const": "player_prop"}}},
+          "then": {
+            "properties": {
+              "side": {"enum": ["over", "under", "yes", "no"]},
+              "team": {"type": "null"},
+              "player": {"type": "object"},
+              "stat": {"type": "object"}
+            }
+          }
+        }
+      ]
     },
     "Projection": {
       "type": "object",
       "required": ["value", "unit", "label"],
-      "properties": {"value": {"type": "number"}, "unit": {"type": "string"}, "label": {"type": "string"}}
+      "properties": {"value": {"type": "number"}, "unit": {"type": "string"}, "label": {"type": "string"}},
+      "additionalProperties": false
     },
     "Odds": {
       "type": "object",
       "required": ["decimal", "american"],
-      "properties": {"decimal": {"type": "number", "exclusiveMinimum": 1}, "american": {"type": "integer"}}
+      "properties": {"decimal": {"type": "number", "exclusiveMinimum": 1}, "american": {"type": "integer"}},
+      "additionalProperties": false
     },
     "OddsSource": {
       "type": "object",
@@ -439,9 +703,18 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Both 
         "kind": {"enum": ["bookmaker", "market_average"]},
         "id": {"type": ["string", "null"]},
         "name": {"type": "string"}
-      }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "bookmaker"}}},
+          "then": {"properties": {"id": {"type": "string"}}},
+          "else": {"properties": {"id": {"type": "null"}}}
+        }
+      ]
     }
-  }
+  },
+  "additionalProperties": false
 }
 ```
 
@@ -451,7 +724,7 @@ Both examples validate against the schema above. The values are illustrative; ov
 
 ### A subscriber's day
 
-Three picks for a US subscriber with tz\_offset -4: a settled player prop that won (its closing line had moved to 27.5, so current.edge is null and edge\_state closed), a moneyline the engine cancelled before the game, and an open spread whose price has eased from 2.0000 to 1.9500 but is still above the midpoint 1.9091, so edge\_state is live.
+Three picks for a US subscriber with tz\_offset -4: a settled player prop that won (its closing line had moved to 27.5, so current.edge is null and edge\_state closed), a moneyline the engine cancelled before the game (its price had already fallen below break-even, so its last edge\_state is closed; edge state never cancels a pick, the engine did), and an open spread whose price has eased from 2.0000 to 1.9500 but is still above the midpoint 1.9091, so edge\_state is live.
 
 ```json
 {
@@ -576,4 +849,4 @@ Everything else on this page is the target. Build against the provisional values
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft | App team: pending. BFF: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day, after review: schema closed and given the selection, free-user and overlay\_key rules; free-user tie-break matches the agreed rule; which picks are locked, AU wording, refresh rules and the day-window vectors added | App team: pending. BFF: pending |

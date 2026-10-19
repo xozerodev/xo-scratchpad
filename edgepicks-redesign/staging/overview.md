@@ -63,11 +63,12 @@ Each contract page lists the decisions that can still change it; this table gath
 | Decision | Pages it changes | Owner | Due |
 | --- | --- | --- | --- |
 | Status vocabulary | Producer pick record | Bet engine, data engineering, monitor owner | Oct 21, 2026 |
+| Cancelled returning to open before the start (the NFL engine reinstates depth-chart cancellations today) | Producer pick record, snapshot API | Bet engine, product | With the status vocabulary |
 | Reason codes | Snapshot API, producer pick record | Spec owner | Oct 21, 2026 |
 | Display basis for edges | Snapshot API | Bet engine, product | Oct 23, 2026 |
 | When the engine cancels | Snapshot API, producer pick record | Bet engine, product | Oct 30, 2026 |
 | Overlay key format and read rules | Snapshot API, realtime overlays | Monitor owner, app team | Nov 2, 2026 |
-| Engine persistence | Producer pick record | Bet engine, NBA schema owners | Before the engine's next tst promotion |
+| Engine persistence, including pausing without removing published picks | Producer pick record | Bet engine, NBA schema owners | Before the engine's next tst promotion, and before NBA player picks are reinstated |
 | Document layout and pick id format | Producer pick record | Bet engine, data engineering | Not scheduled |
 
 ### How to publish
@@ -79,3 +80,16 @@ Each contract page lists the decisions that can still change it; this table gath
 5. Run each page's examples and vectors against the BFF mock and one producer before the first page is agreed.
 
 The NBA page remains the producer's design narrative (sources, transforms, container layout). These pages take over the part other teams build against.
+
+### Working in dev
+
+Tst serves real users, so building to these contracts happens in dev, which is also used for testing. Any parallel setup (separate bet engine output tables, a second Publish Engine instance, a second BFF instance) keeps to these rules:
+
+1. Content goes to a separate Cosmos database, so a misconfigured target fails instead of overwriting dev data.
+2. It sends no events to the dev notification queue, and a second BFF does not consume that queue.
+3. Caches are not shared with the dev BFF, or use a separate key prefix.
+4. My Picks data written against new pick ids goes to separate containers; user accounts and subscriptions stay shared.
+5. Any live edge monitor feeding it reads and writes dev data only.
+6. It has an end date: once the pages are agreed and their examples and vectors pass, dev moves to the new shape and the parallel setup is removed.
+
+Engine switches in dev and tst, such as the NBA player-pick switch, follow the persistence rule: they stop new picks and never remove published ones.

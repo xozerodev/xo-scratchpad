@@ -27,11 +27,11 @@ Every Edge Pick is stored as one typed record per pick per region, with the same
 ## Rules a producer keeps
 
 1. **Identity.** pick\_id is unique within a region and never changes when the price or line moves. It includes the line wherever two picks could otherwise share game, market (or player and stat) and side. A pick on a new line is a new pick with its own id.
-2. **Persistence.** Once published, a pick appears in every later publish of its document until it is settled or void. A pick the engine no longer backs becomes cancelled, with a reason; one published in error becomes withdrawn. Rebuilding picks from scratch on each run must not drop earlier picks.
+2. **Persistence.** Once published, a pick appears in every later publish of its document until it is settled or void. A pick the engine no longer backs becomes cancelled, with a reason; one published in error becomes withdrawn. Rebuilding picks from scratch on each run must not drop earlier picks, and pausing or switching a producer off stops new picks without removing published ones.
 3. **Frozen entry.** pick\_date\_time, probability, stake\_units and every entry\_ field keep their first-publish values for the pick's life. Later runs update only current\_ fields, observed\_at, is\_closing, edge\_status, pick\_status, status\_reason and outcome.
 4. **Observation time.** A record with a current price carries observed\_at, the time the price was seen at the book, not the time the record was written.
-5. **One writer.** Only the Publish Engine writes pick documents. The edge monitor's latest observation reaches them through the Publish Engine, never by a direct write.
-6. **Forward only.** pick\_status moves open to awaiting\_result, cancelled, void or withdrawn, and awaiting\_result to settled or void. Nothing moves backwards.
+5. **One writer.** Only the Publish Engine writes pick documents. The edge monitor's latest observation reaches them through the Publish Engine, never by a direct write. A new observation reaches the record within 5 minutes, and is\_closing is true only on the last observation before the game starts.
+6. **Forward only.** pick\_status moves open to awaiting\_result, cancelled, void or withdrawn, and awaiting\_result to settled or void. Nothing moves backwards. Whether a cancelled pick may return to open before the game starts is still open (see "Not yet decided").
 
 ### Statuses and reasons
 
@@ -39,7 +39,7 @@ Every Edge Pick is stored as one typed record per pick per region, with the same
 | --- | --- | --- | --- | --- |
 | open | Published; the game has not started | null | null | BFF serves it; the monitor watches it |
 | awaiting\_result | The game has started; not graded | null | null | BFF serves it with the closing market; the monitor stops |
-| cancelled | The engine stopped backing the pick before the game started | null | should be set | BFF serves it as cancelled, with copy for the reason |
+| cancelled | The engine stopped backing the pick before the game started | null | should be set | BFF serves it as cancelled, with copy for the reason; the monitor stops and deletes its overlay |
 | settled | Graded on the entry odds | won, lost or push | null | BFF serves the result |
 | void | The game was postponed or cancelled, or the market voided | void | set when known, usually game\_void | BFF serves it as void |
 | withdrawn | Published in error | null | optional | BFF never serves it; the monitor stops |
@@ -147,7 +147,7 @@ One record shape carries both game picks (WLTP: moneyline, spread, total, draw, 
 
 ### How each league's picks map onto the record
 
-Checked at app-data dev 2b6f998 and nba\_bet\_engine dev 0a339e6.
+Checked at app-data dev 2b6f998 and nba\_bet\_engine dev 3bfbb8b. NBA player picks are suspended there for now and will be reinstated; the mapping is unchanged.
 
 | League and type | Written today | Becomes |
 | --- | --- | --- |
@@ -193,7 +193,7 @@ Two complete records, both valid against the schema below. P1, an NBA player pic
   "probability": 0.6565, "projection_value": null, "projection_unit": null,
   "pick_date_time": "2026-10-22T03:00:00.000Z",
   "entry_decimal_odds": 1.87, "entry_american_odds": -115, "entry_edge": 0.1217,
-  "edge_basis": "prob", "edge_threshold": 0.03, "stake_units": 2,
+  "edge_basis": "prob", "edge_threshold": 0.03, "stake_units": 1,
   "odds_source_kind": "bookmaker", "entry_bookmaker_id": "fanduel",
   "current_decimal_odds": null, "current_american_odds": null, "current_line": null,
   "current_odds_source_kind": null, "current_bookmaker_id": null,
@@ -225,7 +225,7 @@ G4, an EPL draw on the expected-value basis (0.30 × 3.60 − 1 = 0.08) for the 
 
 ## JSON Schema
 
-JSON Schema draft 2020-12, complete: it references nothing outside itself. Producer CI validates every record before the Publish Engine writes it. Rules 1 to 3 and 6 compare a record with its earlier versions, so producer CI checks them against the previous publish; the 4-decimal limit is also a test, not a schema keyword.
+JSON Schema draft 2020-12, complete: it references nothing outside itself. It is closed (no field it does not define) and encodes the null rules for observations, pulled prices, sources, game and player picks, markets, lines and projections, so producer CI rejects any record that breaks them. Consumers do not validate at runtime and ignore fields they do not know, so a later 4.x that adds a field never breaks an older consumer. Rules 1 to 3 and 6 compare a record with its earlier versions, so producer CI checks them against the previous publish; the 4-decimal limit is also a test, not a schema keyword.
 
 ```json
 {
@@ -233,13 +233,7 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Produ
   "$id": "https://contracts.xosports.ai/edge-picks/v4/producer-pick.schema.json",
   "title": "Edge Picks producer pick record 4.0.0",
   "type": "object",
-  "required": ["schema_version", "pick_id", "region", "game_sk", "pick_kind", "market", "side", "line",
-               "team_sk", "player_sk", "stat_code", "probability", "projection_value", "projection_unit",
-               "pick_date_time", "entry_decimal_odds", "entry_american_odds", "entry_edge", "edge_basis",
-               "edge_threshold", "stake_units", "odds_source_kind", "entry_bookmaker_id",
-               "current_decimal_odds", "current_american_odds", "current_line", "current_odds_source_kind",
-               "current_bookmaker_id", "observed_at", "is_closing", "current_edge", "edge_status",
-               "rec_action", "pick_status", "status_reason", "outcome"],
+  "required": ["schema_version", "pick_id", "region", "game_sk", "pick_kind", "market", "side", "line", "team_sk", "player_sk", "stat_code", "probability", "projection_value", "projection_unit", "pick_date_time", "entry_decimal_odds", "entry_american_odds", "entry_edge", "edge_basis", "edge_threshold", "stake_units", "odds_source_kind", "entry_bookmaker_id", "current_decimal_odds", "current_american_odds", "current_line", "current_odds_source_kind", "current_bookmaker_id", "observed_at", "is_closing", "current_edge", "edge_status", "rec_action", "pick_status", "status_reason", "outcome"],
   "properties": {
     "schema_version": {"type": "string", "pattern": "^4\\.\\d+\\.\\d+$"},
     "pick_id": {"type": "string", "minLength": 1},
@@ -273,49 +267,141 @@ JSON Schema draft 2020-12, complete: it references nothing outside itself. Produ
     "is_closing": {"type": "boolean"},
     "current_edge": {"type": ["number", "null"]},
     "edge_status": {"enum": ["live", "narrowing", "closed", "suspended", null]},
-    "rec_action": {"enum": ["play", "watch", "pass", null]},
+    "rec_action": {"type": "null"},
     "pick_status": {"enum": ["open", "awaiting_result", "cancelled", "settled", "void", "withdrawn"]},
     "status_reason": {"enum": ["probability_moved", "market_moved", "lineup_change", "withdrawn", "game_void", null]},
     "outcome": {"enum": ["won", "lost", "push", "void", null]}
   },
   "allOf": [
-    {"if": {"properties": {"current_decimal_odds": {"type": "number"}}},
-     "then": {"properties": {"observed_at": {"type": "string"}, "current_american_odds": {"type": "integer"}}}},
-    {"if": {"properties": {"observed_at": {"type": "null"}}},
-     "then": {"properties": {"current_decimal_odds": {"type": "null"}, "edge_status": {"type": "null"},
-                             "current_edge": {"type": "null"}, "is_closing": {"const": false}}}},
-    {"if": {"properties": {"odds_source_kind": {"const": "bookmaker"}}},
-     "then": {"properties": {"entry_bookmaker_id": {"type": "string"}}}},
-    {"if": {"properties": {"pick_status": {"const": "settled"}}},
-     "then": {"properties": {"outcome": {"enum": ["won", "lost", "push"]}}}},
-    {"if": {"properties": {"pick_status": {"const": "void"}}},
-     "then": {"properties": {"outcome": {"const": "void"}}}},
-    {"if": {"properties": {"pick_status": {"enum": ["open", "awaiting_result", "cancelled", "withdrawn"]}}},
-     "then": {"properties": {"outcome": {"const": null}}}},
-    {"if": {"properties": {"pick_status": {"enum": ["open", "awaiting_result", "settled"]}}},
-     "then": {"properties": {"status_reason": {"const": null}}}},
-    {"if": {"properties": {"pick_kind": {"const": "player"}}},
-     "then": {"properties": {"market": {"const": "player_prop"}, "player_sk": {"type": "integer"}, "stat_code": {"type": "string"}}},
-     "else": {"properties": {"market": {"not": {"const": "player_prop"}}}}},
-    {"if": {"properties": {"market": {"enum": ["moneyline", "spread"]}}},
-     "then": {"properties": {"side": {"enum": ["home", "away"]}, "team_sk": {"type": "integer"}}}},
-    {"if": {"properties": {"market": {"enum": ["spread", "total"]}}},
-     "then": {"properties": {"line": {"type": "number"}}}},
-    {"if": {"properties": {"market": {"enum": ["moneyline", "draw", "btts"]}}},
-     "then": {"properties": {"line": {"type": "null"}}}},
-    {"if": {"properties": {"market": {"const": "total"}}},
-     "then": {"properties": {"side": {"enum": ["over", "under"]}, "team_sk": {"type": "null"}}}},
-    {"if": {"properties": {"market": {"const": "draw"}}},
-     "then": {"properties": {"side": {"const": "draw"}, "team_sk": {"type": "null"}}}},
-    {"if": {"properties": {"market": {"const": "btts"}}},
-     "then": {"properties": {"side": {"enum": ["yes", "no"]}, "team_sk": {"type": "null"}}}},
-    {"if": {"properties": {"market": {"const": "player_prop"}}},
-     "then": {"properties": {"side": {"enum": ["over", "under", "yes", "no"]}, "team_sk": {"type": "null"}}}},
-    {"if": {"properties": {"market": {"const": "player_prop"}, "side": {"enum": ["over", "under"]}}},
-     "then": {"properties": {"line": {"type": "number"}}}},
-    {"if": {"properties": {"side": {"enum": ["yes", "no"]}}},
-     "then": {"properties": {"line": {"type": "null"}}}}
-  ]
+    {
+      "if": {"properties": {"current_decimal_odds": {"type": "number"}}},
+      "then": {"properties": {"observed_at": {"type": "string"}, "current_american_odds": {"type": "integer"}}}
+    },
+    {
+      "if": {"properties": {"observed_at": {"type": "null"}}},
+      "then": {
+        "properties": {
+          "current_decimal_odds": {"type": "null"},
+          "current_american_odds": {"type": "null"},
+          "current_line": {"type": "null"},
+          "current_odds_source_kind": {"type": "null"},
+          "current_bookmaker_id": {"type": "null"},
+          "current_edge": {"type": "null"},
+          "edge_status": {"type": "null"},
+          "is_closing": {"const": false}
+        }
+      },
+      "else": {"properties": {"edge_status": {"type": "string"}, "current_odds_source_kind": {"type": "string"}}}
+    },
+    {
+      "if": {"properties": {"odds_source_kind": {"const": "bookmaker"}}},
+      "then": {"properties": {"entry_bookmaker_id": {"type": "string"}}},
+      "else": {"properties": {"entry_bookmaker_id": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"pick_status": {"const": "settled"}}},
+      "then": {"properties": {"outcome": {"enum": ["won", "lost", "push"]}}}
+    },
+    {
+      "if": {"properties": {"pick_status": {"const": "void"}}},
+      "then": {"properties": {"outcome": {"const": "void"}}}
+    },
+    {
+      "if": {"properties": {"pick_status": {"enum": ["open", "awaiting_result", "cancelled", "withdrawn"]}}},
+      "then": {"properties": {"outcome": {"const": null}}}
+    },
+    {
+      "if": {"properties": {"pick_status": {"enum": ["open", "awaiting_result", "settled"]}}},
+      "then": {"properties": {"status_reason": {"const": null}}}
+    },
+    {
+      "if": {"properties": {"pick_kind": {"const": "player"}}},
+      "then": {
+        "properties": {
+          "market": {"const": "player_prop"},
+          "player_sk": {"type": "integer"},
+          "stat_code": {"type": "string"}
+        }
+      },
+      "else": {
+        "properties": {
+          "market": {"not": {"const": "player_prop"}},
+          "player_sk": {"type": "null"},
+          "stat_code": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"market": {"enum": ["moneyline", "spread"]}}},
+      "then": {"properties": {"side": {"enum": ["home", "away"]}, "team_sk": {"type": "integer"}}}
+    },
+    {
+      "if": {"properties": {"market": {"enum": ["spread", "total"]}}},
+      "then": {"properties": {"line": {"type": "number"}}}
+    },
+    {
+      "if": {"properties": {"market": {"enum": ["moneyline", "draw", "btts"]}}},
+      "then": {"properties": {"line": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"market": {"const": "total"}}},
+      "then": {"properties": {"side": {"enum": ["over", "under"]}, "team_sk": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"market": {"const": "draw"}}},
+      "then": {"properties": {"side": {"const": "draw"}, "team_sk": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"market": {"const": "btts"}}},
+      "then": {"properties": {"side": {"enum": ["yes", "no"]}, "team_sk": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"market": {"const": "player_prop"}}},
+      "then": {"properties": {"side": {"enum": ["over", "under", "yes", "no"]}, "team_sk": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"market": {"const": "player_prop"}, "side": {"enum": ["over", "under"]}}},
+      "then": {"properties": {"line": {"type": "number"}}}
+    },
+    {
+      "if": {"properties": {"side": {"enum": ["yes", "no"]}}},
+      "then": {"properties": {"line": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"observed_at": {"type": "string"}, "current_decimal_odds": {"type": "null"}}},
+      "then": {
+        "properties": {
+          "current_american_odds": {"type": "null"},
+          "current_line": {"type": "null"},
+          "current_edge": {"type": "null"},
+          "edge_status": {"const": "suspended"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"edge_status": {"const": "suspended"}}},
+      "then": {"properties": {"current_decimal_odds": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"current_odds_source_kind": {"const": "bookmaker"}}},
+      "then": {"properties": {"current_bookmaker_id": {"type": "string"}}},
+      "else": {"properties": {"current_bookmaker_id": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"market": {"enum": ["total", "player_prop"]}, "side": {"enum": ["over", "under"]}}},
+      "then": {"properties": {"line": {"exclusiveMinimum": 0}}}
+    },
+    {
+      "if": {"properties": {"line": {"type": "null"}}},
+      "then": {"properties": {"current_line": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"projection_value": {"type": "null"}}},
+      "then": {"properties": {"projection_unit": {"type": "null"}}},
+      "else": {"properties": {"projection_unit": {"type": "string"}}}
+    }
+  ],
+  "additionalProperties": false
 }
 ```
 
@@ -352,13 +438,13 @@ Observations, not requirements: what the dev branches did when checked. Producti
 
 | Producer | Checked at | Pick id today | Status today | Edge today | Gaps |
 | --- | --- | --- | --- | --- | --- |
-| NBA game picks (WLTP) | app-data dev 2b6f998; nba\_bet\_engine dev 0a339e6 | {game\_sk}\|{market}\_{selection}\|{selection}\|{line}\|{variant}\|full\|{region} | won or lost from the bet outcome, otherwise scheduled. A push is stored as no outcome, so it stays scheduled | Probability basis, in percentage points; odds rounded to 2 places | At most one pick per game; the US pick is copied into au; never cancelled; picks with no edge are dropped; picks are rebuilt each run (rule 2) |
-| NBA player picks (PS) | same | {game\_sk}\|{player\_sk}\|{stat}\|{type}\|{line}\|{variant}\|full\|{region} | won or lost; void when the game is final with no outcome (push or did not play); cancelled when the game was cancelled; otherwise scheduled | Probability basis, in percentage points; probability blended toward the no-vig market with a 0.30 cap; stake tiers start at 3 points | Points, rebounds, assists and threes only; top 3 per team; player\_sk written as a string; the same picks mirrored into au and us; picks of re-evaluated games deleted (45f6f4f, dev only; rule 2) |
+| NBA game picks (WLTP) | app-data dev 2b6f998; nba\_bet\_engine dev 3bfbb8b | {game\_sk}\|{market}\_{selection}\|{selection}\|{line}\|{variant}\|full\|{region} | won or lost from the bet outcome, otherwise scheduled. A push is stored as no outcome, so it stays scheduled | Probability basis, in percentage points; odds rounded to 2 places | At most one pick per game; in dev spreads come first and a total is picked only when a game has no spread market; moneyline needs both teams to have played 10 games; the US pick is copied into au; never cancelled; picks with no edge are dropped; picks are rebuilt each run (rule 2) |
+| NBA player picks (PS) | same | {game\_sk}\|{player\_sk}\|{stat}\|{type}\|{line}\|{variant}\|full\|{region} | won or lost; void when the game is final with no outcome (push or did not play); cancelled when the game was cancelled; otherwise scheduled | Probability basis, in percentage points; model probability no longer blended toward the market (the 0.30 model-vs-market cap still filters); flat 1 unit at 3 points of edge or more; generalised Poisson pricing | Suspended in dev and tst since 3bfbb8b, to be reinstated shortly. While suspended the job runs, publishes nothing and clears the picks of the games it evaluates (rule 2). Otherwise: points, rebounds, assists and threes only; top 3 per team; player\_sk written as a string; the same picks mirrored into au and us; picks of re-evaluated games deleted (45f6f4f; rule 2) |
 | NFL, MLB, WNBA and EPL game picks | app-data dev 2b6f998, generic path | {game\_sk}*{bet\_type}*{region}, without the line | NFL and WNBA: one status for the whole game; MLB: per pick; EPL: none. A push is stored as no outcome | Not published: probability only | One pick per region per game; side and line only inside bet\_line, bookmaker.position and code strings; au picks can carry US books |
-| NFL and MLB player picks | same | {game\_sk}\|{player\_sk}\|{stat}\|{type}\|{region}, without the line | Scheduled, Final or Cancelled, in mixed case | Not published | Line and odds written as strings; stat codes in mixed case; anytime touchdown written with line 0.5 |
-| WNBA player picks | same | the game\_sk alone | none | none | A raw copy with no document type; the BFF never reads it |
+| NFL and MLB player picks | same; nfl\_bet\_engine dev 3cf118b (fetched Sep 14, 2026) | {game\_sk}\|{player\_sk}\|{stat}\|{type}\|{region}, without the line | Scheduled, Final or Cancelled, in mixed case. NFL: a pick whose player drops out of his position's top N on the depth chart is cancelled, and restored to Scheduled if he climbs back, until kickoff | Not published | Line and odds written as strings; stat codes in mixed case; anytime touchdown written with line 0.5; cancelled can move back to scheduled (rule 6) |
+| WNBA player picks | app-data dev 2b6f998 | the game\_sk alone | none | none | A raw copy with no document type; the BFF never reads it |
 | Settlement write-back | app-data dev 2b6f998 | n/a | Stubs are empty | n/a | No producer sets settled or void through it |
-| Live edge monitor | live-odds dev e2c04ca | {bet id}\|{REGION} | Watches only Scheduled picks | Expected value, t = 0 | Its ids match no pick\_id; observations do not reach the record through the Publish Engine (rule 5) |
+| Live edge monitor | live-odds dev 30e05ce | {bet id}\|{REGION} | Watches only Scheduled picks | Expected value, t = 0 | Its ids match no pick\_id; observations do not reach the record through the Publish Engine (rule 5); when a re-run changes a pick's id, the old overlay node is never deleted |
 
 Fields still to add, by producer: pick\_kind, market, side and line as structured fields (all); edge\_basis, edge\_threshold, odds\_source\_kind and entry\_bookmaker\_id (all); pick\_date\_time, entry odds, entry\_edge and stake\_units (all except NBA, which has them; WNBA player picks lack pick\_date\_time); projection; current line and bookmaker; observed\_at; is\_closing (derived by the Publish Engine); current\_edge and edge\_status (NFL has them from the monitor only); outcome as won, lost, push, void instead of 0, 1, 2.
 
@@ -381,10 +467,11 @@ Fields still to add, by producer: pick\_kind, market, side and line as structure
 | Item | Provisional value on this page | What could change | Decision due |
 | --- | --- | --- | --- |
 | Status vocabulary | open, awaiting\_result, cancelled, settled, void, withdrawn | Names or the split between cancelled and withdrawn | Oct 21, 2026 |
+| Cancelled returning to open | Not allowed: status only moves forward | Allow cancelled to return to open before the game starts, as the NFL engine does when a player climbs back up the depth chart; or the NFL engine stops reinstating | With the status vocabulary |
 | Reason codes | probability\_moved, market\_moved, lineup\_change, withdrawn, game\_void | withdrawn may be dropped as a reason (it is a status); book\_pulled and competitor\_withdrawn may be added | Oct 21, 2026 |
 | Stat codes | The table under "Stat codes" | Names, and codes for stats not produced yet | With the status vocabulary |
 | When the engine cancels | When it stops backing a pick before the game; never for a line move alone | Which re-evaluations cancel, and with which reasons | Oct 30, 2026 |
-| Engine persistence | Rule 2 | How the NBA engine keeps earlier picks while rebuilding | Before the engine's next tst promotion |
+| Engine persistence | Rule 2 | How the NBA engine keeps earlier picks while rebuilding, and how a producer pauses without removing published picks (the NBA player-pick switch clears them today) | Before the engine's next tst promotion, and before NBA player picks are reinstated |
 | Periods, quarter lines | Full game only; no quarter lines | Halves or quarters would add a period field, a minor version | Not scheduled |
 | Document layout and id format | Not fixed; the record shape is | Container, partitioning, grouping, and a common pick\_id format | Not scheduled |
 | App display basis | Not a producer concern; the BFF converts | Nothing on this page | Oct 23, 2026 |
@@ -393,4 +480,4 @@ Fields still to add, by producer: pick\_kind, market, side and line as structure
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day: market rules for game and player picks, stat codes, each league's mapping and examples added; the schema now checks side, line and team per market. After review: schema closed, with the observation, pulled-price, source, game-pick, line and projection rules; pausing never removes picks; 5-minute observation rule; nba\_bet\_engine and live-odds observations moved to 3bfbb8b and 30e05ce | Bet engine: pending. Data engineering: pending. BFF: pending. Edge monitor: pending |

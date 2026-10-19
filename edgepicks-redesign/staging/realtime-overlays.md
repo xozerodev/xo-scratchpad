@@ -46,7 +46,7 @@ Each open pick a monitor covers has two nodes under the same key: a small summar
 | Summary path | /edgePickStatus/{overlay\_key} |
 | Detail path | /edgePicks/{overlay\_key} |
 | Written | From the monitor's first observation while the pick is open and its game has not started, at every observation after that |
-| Deleted | Both nodes, when the game starts or the pick stops being open. The next snapshot carries the closing values |
+| Deleted | Both nodes, on the monitor's next run after the game starts or the pick stops being open for any reason, including a pick replaced by another, never only at kickoff. On every run the monitor also deletes any key for its sport that matches no open pick it watches, and any node whose game has started. The next snapshot carries the closing values |
 | Writer | Live edge monitor, server only. Today it covers NFL; any producer that covers a sport follows this page |
 
 ### Key derivation
@@ -154,7 +154,8 @@ Summary node:
   "properties": {
     "edge_status": {"enum": ["live", "narrowing", "closed", "suspended"]},
     "as_of": {"type": "string", "format": "date-time"}
-  }
+  },
+  "additionalProperties": false
 }
 ```
 
@@ -177,11 +178,22 @@ Detail node:
     "live_edge": {"type": ["number", "null"]}
   },
   "allOf": [
-    {"if": {"properties": {"live_price": {"type": "null"}}},
-     "then": {"properties": {"edge_status": {"const": "suspended"}, "live_edge": {"type": "null"}}}}
-  ]
+    {
+      "if": {"properties": {"live_price": {"type": "null"}}},
+      "then": {
+        "properties": {"edge_status": {"const": "suspended"}, "live_point": {"type": "null"}, "live_edge": {"type": "null"}}
+      }
+    },
+    {
+      "if": {"properties": {"edge_status": {"const": "suspended"}}},
+      "then": {"properties": {"live_price": {"type": "null"}}}
+    }
+  ],
+  "additionalProperties": false
 }
 ```
+
+Both node schemas are closed, so the monitor's CI rejects a field they do not define. The app does not validate at runtime and ignores fields it does not know, so a later 4.x that adds a field never breaks an older app.
 
 ### Example
 
@@ -255,14 +267,15 @@ Observations, not requirements: what the dev branches did when checked. Each lin
 
 | Area | Observed (repository, branch, commit) | Gap |
 | --- | --- | --- |
-| Keys | live-odds dev e2c04ca: key is {league}\_{pick id}, with the monitor's own id ({bet id}\|{REGION}, region uppercase) | Matches no snapshot id, so no app can find the node. Use the shared key function |
-| Coverage | live-odds dev e2c04ca: NFL only, and only picks whose status is Scheduled | Other sports have no overlay; overlay\_key is null for them |
-| Times | live-odds dev e2c04ca: Python isoformat(), giving microseconds and +00:00 | Write Z with milliseconds. The app's lenient parsing covers it meanwhile |
-| next\_update\_due | live-odds dev e2c04ca: written only when known | Always write it |
-| live\_edge | live-odds dev e2c04ca: not written | Write it |
-| Basis and threshold | live-odds dev e2c04ca: expected-value basis only, t fixed at 0 | Read basis and t from the pick record |
-| Rounding | live-odds dev e2c04ca: b and m compared unrounded | Round as above; vectors E8 and E11 depend on it |
-| No probability | live-odds dev e2c04ca: writes live | Write no node |
+| Keys | live-odds dev 30e05ce: key is {league}\_{pick id}, with the monitor's own id ({bet id}\|{REGION}, region uppercase) | Matches no snapshot id, so no app can find the node. Use the shared key function |
+| Stale nodes | live-odds dev 30e05ce, design doc section 14: in dev, 8 nodes (4 picks in AU and US) were still live up to about 382 hours after kickoff. A re-run changed each pick's type, so its id changed, and kickoff cleanup only deletes ids still watched | Delete on the next run once a pick is no longer open, and sweep keys that match no open pick. The team's own plan does both |
+| Coverage | live-odds dev 30e05ce: NFL only, and only picks whose status is Scheduled | Other sports have no overlay; overlay\_key is null for them |
+| Times | live-odds dev 30e05ce: Python isoformat(), giving microseconds and +00:00 | Write Z with milliseconds. The app's lenient parsing covers it meanwhile |
+| next\_update\_due | live-odds dev 30e05ce: written only when known | Always write it |
+| live\_edge | live-odds dev 30e05ce: not written | Write it |
+| Basis and threshold | live-odds dev 30e05ce: expected-value basis only, t fixed at 0 | Read basis and t from the pick record |
+| Rounding | live-odds dev 30e05ce: b and m compared unrounded | Round as above; vectors E8 and E11 depend on it |
+| No probability | live-odds dev 30e05ce: writes live | Write no node |
 | st values | live-scores dev 11599f1: NBA values other than scheduled and final were unverified for NBA at that commit | Confirm against live games |
 
 ## Not yet decided
@@ -276,4 +289,4 @@ Observations, not requirements: what the dev branches did when checked. Each lin
 
 | Date | Version | Change | Signed by |
 | --- | --- | --- | --- |
-| Oct 19, 2026 | 4.0.0 draft | First self-contained draft | App team: pending. Edge monitor: pending. Live scores: pending |
+| Oct 19, 2026 | 4.0.0 draft | First self-contained draft. Same day, after review: schemas closed; a pulled price nulls live\_point and suspended means no price, both ways; nodes deleted on the next run once a pick is no longer open, with a sweep for orphaned keys | App team: pending. Edge monitor: pending. Live scores: pending |
