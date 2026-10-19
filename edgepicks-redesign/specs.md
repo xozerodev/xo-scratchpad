@@ -6,7 +6,7 @@ This specification defines what the Edge Picks redesign needs from every system 
 
 **Status:** draft for review (contract version 4.0.0). **Reading the rules:** MUST and MUST NOT are requirements; SHOULD is a strong recommendation that needs a stated reason to skip; MAY is optional. Statements about existing systems describe them as of 16 Oct 2026 and are marked as observations, not requirements.
 
-**Inputs:** [Edge Picks redesign](https://xosports.atlassian.net/wiki/spaces/PB/pages/726237185/Edge+Picks+redesign) (product requirements and designs), [Bet Engine Roadmap](https://claude.ai/artifact/FX29b7SibKX5gx1SiyLpvH) (Phases 1A, 1B, 2), the live edge monitor design (live-odds), the live scores app integration guide (live-scores), and the Publish Engine container references.
+**Inputs:** [Edge Picks redesign](https://xosports.atlassian.net/wiki/spaces/PB/pages/726237185/Edge+Picks+redesign) (product requirements and designs), [Bet Engine Roadmap](https://claude.ai/artifact/FX29b7SibKX5gx1SiyLpvH) (Phases 1A, 1B, 2; a claude.ai artifact that other teams may not be able to open, so until it is published in Confluence every phase date in this spec is provisional), the live edge monitor design (live-odds), the live scores app integration guide (live-scores), and the Publish Engine container references.
 
 ## 1. Purpose, scope and principles
 
@@ -16,14 +16,14 @@ The app defines the data it needs; upstream systems produce it. This reverses th
 
 **Out of scope:** My Picks slip storage, push notifications, the WordPress feed, the live in-game score screens (covered by the live scores integration guide), and model training.
 
-**Principles** (each is enforced by acceptance criteria in section 10)
+**Principles** (each names the section 10 criteria that check it)
 
-1. **Consumer-defined contract.** The app-facing contract in section 4 is the source of truth. Upstream schemas exist to satisfy it, and changes to it are reviewed by the app team first.
-2. **Facts and decisions upstream, presentation downstream.** Producers send typed, structured values (market, side, line, odds, probability, status codes). They never send display copy or encoded strings that need parsing.
-3. **One owner per value.** Every number and state shown on the card is computed in exactly one system. Other systems map it; they never recompute it.
-4. **Explicit mapping.** The BFF builds each response field from a defined source. An upstream field that this spec does not define never reaches the app.
-5. **Shape-stable live data.** The fields that describe the current market keep the same names and meaning however they are delivered (snapshot or realtime overlay), so delivery can change without a contract change.
-6. **Additive change.** New optional fields are allowed at any time. Renames, removals or changes of meaning need a new major version.
+1. **Consumer-defined contract.** The app-facing contract in section 4 is the source of truth. Upstream schemas exist to satisfy it, and changes to it are reviewed by the app team first (AC-2; 8.6).
+2. **Facts and decisions upstream, presentation downstream.** Producers send typed, structured values (market, side, line, odds, probability, status codes). They never send display copy or encoded strings that need parsing (AC-19).
+3. **One owner per value.** Every number and state shown on the card has one owner and one formula. Another system computes it only where 6.1 allows, and then must produce exactly the owner's result; otherwise it maps the value and never recomputes it (10.3, 10.4, AC-35).
+4. **Explicit mapping.** The BFF builds each response field from a defined source. An upstream field that this spec does not define never reaches the app (AC-3).
+5. **Shape-stable live data.** The fields that describe the current market keep the same names and meaning however they are delivered (snapshot or realtime overlay), so delivery can change without a contract change (AC-43).
+6. **Additive change.** New optional fields are allowed at any time. Renames, removals or changes of meaning need a new major version (AC-44).
 
 ## 2. System context and ownership
 
@@ -54,25 +54,25 @@ Availability key: **Today** = served now · **1A** = Bet Engine Phase 1A (31 Oct
 | Pick title ("Cade Cunningham Over 24.5 PTS") | `selection.label`, `market`, `side`, `stat`, `team`, `player`, `entry.line` | BFF composes from producer fields | Today by parsing codes; structured fields: Ask (1B) |
 | Game line ("Pistons @ Nuggets · 10:00pm") | `game.label`, `game.starts_at` | BFF | Today |
 | Upcoming / Live / Final chip | `game.state` | Live scores service, schedule | Live scores in dev only (X14); schedule status in tst |
-| "Picked at 2:40 PM" | `picked_at` | Bet engine | 1A; WNBA player picks have no publish time: Ask |
+| "Picked at 2:40 PM" | `picked_at` | Bet engine | NBA: today; others: 1A; WNBA player picks have no publish time: Ask |
 | Probability wheel | `model.probability` | Bet engine | Today |
 | XO Projection | `model.projection` | Bet engine | Today |
 | Bookmaker name or "Avg. Odds" | `entry.source`, `current.source` | Bet engine (book id), BFF (name) | 1A names one book; a book per price: Ask; true AU average: None |
-| Entry odds and line | `entry.odds`, `entry.line` | Bet engine | 1A |
-| Entry edge ("+9% Edge") | `entry.edge` | Bet engine | 1A |
-| Rec. Bet Size ($) | `entry.stake_units` | Bet engine (units); app (dollars) | 1A |
-| Payout ($) | from stake and `entry.odds` | App | 1A |
+| Entry odds and line | `entry.odds`, `entry.line` | Bet engine | NBA: today; others: 1A |
+| Entry edge ("+9% Edge") | `entry.edge` | Bet engine | NBA: today, as probability edge in percentage points (6.1); others: 1A |
+| Rec. Bet Size ($) | `entry.stake_units` | Bet engine (units); app (dollars) | NBA: today; others: 1A |
+| Payout ($) | from stake and `entry.odds` | App | NBA: today; others: 1A |
 | "This edge stays positive above −125" | `edge_holds_above` | Edge owner (D3) | Once D3 is settled |
 | Market Movement: current line | `current.line` | Live edge monitor | NFL in dev only (X14); others: None |
 | Market Movement: current odds | `current.odds`, `current.source`, `current.observed_at` | Live edge monitor; bet engine hourly | 1A hourly, with observation time (required); NFL monitor in dev only (X14) |
 | Market Movement: current edge | `current.edge` | Edge owner | Same line: derivable; moved line: None |
 | Edge still in play / closed | `edge_state` | Live edge monitor | NFL in dev only (X14); others: None |
 | Rec. Action (Play / Watch / Pass) | `action` | Product thresholds, engine computes | None: null until decided (D4) |
-| Cancelled card and reason | `status`, `status_reason` | Bet engine (code); BFF (copy) | Status 1A; reason: Ask |
+| Cancelled card and reason | `status`, `status_reason` | Bet engine (code); BFF (copy) | Status exists upstream except on NBA game picks, whose status comes only from the outcome (X1); the BFF drops cancelled picks today and must serve them; reason: Ask |
 | Prediction Correct / Incorrect / Void / Push | `result` | Bet engine settlement | Today (push: confirm) |
 | Receipt after kickoff (closing price) | `current` with `is_closing` | Live edge monitor history | Required, not built |
 | All / Player / Game filter | `kind` | BFF | Today |
-| Sort by Edge / Probability / Odds | `entry.edge`, `model.probability`, `entry.odds.decimal` | App | 1A |
+| Sort by Edge / Probability / Odds | `entry.edge`, `model.probability`, `entry.odds.decimal` | App | NBA: today; others: 1A |
 | Locked card (free users) | `access` | BFF | Today |
 
 ## 4. Snapshot API contract (app ↔ BFF)
@@ -150,7 +150,7 @@ Team { id: string; name: string; short_name: string; abbreviation: string; image
 Projection { value: number; unit: string; label: string }
 Odds { decimal: number /* > 1, 4 dp */; american: integer }
 OddsSource { kind: "bookmaker" | "market_average"; id: string | null; name: string }
-ReasonCode = "probability_moved" | "market_moved" | "line_moved" | "lineup_change" | "withdrawn" | "game_void"
+ReasonCode = "probability_moved" | "market_moved" | "lineup_change" | "withdrawn" | "game_void"
 FieldGroup = "selection" | "odds" | "probability" | "projection" | "stake" | "edge"
 ```
 
@@ -180,7 +180,7 @@ FieldGroup = "selection" | "odds" | "probability" | "projection" | "stake" | "ed
 - The app's own sorts (Edge, Probability, Odds) default to descending, put nulls last in both directions, and break ties by game start, then `id`.
 - The route's major version (`/v4`) changes only for breaking changes. `contract_version` changes its minor number for additive fields and its patch number for clarifications.
 - Clients MUST ignore unknown fields and show a neutral fallback for unknown enum values.
-- The existing league release gate applies: picks for a staged league or season are withheld from app builds below the release `api_version`, exactly as on the other match screens.
+- The existing league release gate applies: picks for a staged league or season are withheld from app builds below the release `api_version`, exactly as on the other match screens. The gate is applied in shared document readers, so the route MUST call it for every pick it serves rather than assume it; api\_version is the client build's version and is unrelated to the /v4 route major.
 
 ### 4.5 Caching and errors
 
@@ -206,7 +206,9 @@ A card combines four independent states: the pick's lifecycle, its result, the g
 | `settled` | Result known | none |
 | `void` | Game postponed or cancelled, or the market voided | none |
 
-**Cutoff** is the authoritative game start (`game.starts_at`, or the actual start when the game state source reports it) unless D13 sets it earlier. The producer owns transitions; the BFF maps the current upstream value on every request and keeps no state of its own. A pick published in error (`removed` upstream) is never sent and never counts in records or ROI.
+**Cutoff** is the authoritative game start (`game.starts_at`, or the actual start when the game state source reports it) unless D13 sets it earlier. The producer owns transitions; the BFF maps the current upstream value on every request and keeps no state of its own. A pick published in error (`removed` upstream, or withdrawn in the canonical data model) is never sent and never counts in records or ROI.
+
+**Persistence.** Once published, a pick appears in every later publish of its document, with its current status, until it is settled or void. The only exception is a pick published in error, which becomes withdrawn and is never sent. A publish that omits a previously published pick is a defect. Producers therefore keep a record of every pick they have published, with its publish time and frozen entry fields, and merge each run into it; no run rebuilds a game's pick list from scratch. A pick the engine no longer recommends becomes `cancelled` with a reason; a line move alone leaves it `open` (5.3 rule 3). Checked by AC-45.
 
 **Mapping from upstream values.** The BFF MUST apply this table and nothing else; an unlisted value drops the pick and raises an alert.
 
@@ -214,12 +216,14 @@ A card combines four independent states: the pick's lifecycle, its result, the g
 | --- | --- | --- |
 | `active` (roadmap), `Scheduled` (NFL today), `scheduled`, `pending` (NBA split documents) | `open`; `awaiting_result` once the cutoff has passed | null |
 | `expired` (roadmap) | `awaiting_result` | null |
-| `cancelled` | `cancelled` | null |
+| `cancelled`, set by the engine for a pick withdrawn before the start | `cancelled` | null |
+| `cancelled` meaning the game was cancelled (NBA player picks today) | `void`, reason `game_void` | `void` |
 | `settled` with outcome 1 / 0 / push | `settled` | `won` / `lost` / `push` |
 | `won`, `lost`, `push` (NBA split documents) | `settled` | same value |
 | `void`, `abandoned`, or outcome 2 | `void` | `void` |
 | `rescheduled` | `open` | null |
 | `removed` | not sent | — |
+| `withdrawn` (canonical data model proposal) | not sent; no alert | — |
 | Any other value | not sent; the BFF raises an alert | — |
 
 ### 5.2 Game state
@@ -244,16 +248,18 @@ The live edge monitor owns edge state. Any other system that computes it for spo
 
 1. `unknown`: no market observation yet.
 2. `suspended`: no current price, or the book has pulled the outcome. This means "we don't know", never "the edge closed".
-3. `closed`: the current line differs from the entry line, in either direction (D2 may narrow this to adverse moves only).
+3. `closed`: the entry line and the current line are both present and differ, in either direction (D2 may narrow this to adverse moves only). When either line is null (moneyline, draw, BTTS and yes/no props, or a line that was not observed), this rule does not apply.
 4. `closed`: the current decimal price is at or below the break-even price *b*.
 5. `narrowing`: the entry price is above *b* and the current price is at or below the midpoint *m* between the entry price and *b*.
 6. `live`: otherwise.
 
 ```latex
-b = \frac{1 + t}{p} \qquad m = \frac{d_{\text{entry}} + b}{2}
+b_{\text{ev}} = \frac{1 + t}{p} \qquad b_{\text{prob}} = \frac{1}{p - t} \qquad m = \frac{d_{\text{entry}} + b}{2}
 ```
 
-Here *p* is the model probability at entry, *t* is the expected-value threshold the bet engine publishes picks with (0 today), and *d* is a decimal price. Rules apply only while `status` is `open` and the game has not started. After that, `edge_state` is the state of the closing observation (`is_closing`) and is shown only as part of the receipt.
+Here *p* is the model probability at entry, *t* is the threshold the pick was selected on, in its producer's basis (8.3), and *d* is a decimal price. Rules apply only while `status` is `open` and the game has not started. After that, `edge_state` is the state of the closing observation (`is_closing`) and is shown only as part of the receipt.
+
+**Selection basis.** Each producer declares how it selects picks, and *b* follows that basis. Expected-value basis: a pick qualifies when p × d − 1 > t, so *b* = (1 + t) / p. Probability basis: a pick qualifies when p − 1/d > t, so *b* = 1 / (p − t); if p ≤ t no price clears the threshold, so *b* and `edge_holds_above` are null and rules 4 and 5 are skipped. At t = 0 both bases give *b* = 1/p. Observed on dev (19 Oct): NBA game picks are selected on probability edge above 0, NBA player picks on a probability edge of at least 3 percentage points, and the NFL edge monitor uses expected value with t = 0.
 
 **Precision.** *b* and *m* are computed from unrounded inputs, then rounded to 4 decimal places: b down (toward zero), so a price at the published b never has an edge above t; m half away from zero. Prices are compared at 4 decimal places. Line equality is numeric (24.5 equals 24.50). Without a fixed precision, two correct implementations can disagree at the boundaries.
 
@@ -279,17 +285,17 @@ Every derived number has one formula and one owner. A layer that is not the owne
 ### 6.1 Formulas
 
 ```latex
-\text{edge} = p \times d - 1 \qquad \text{edge} \le t \iff d \le b
+\text{edge}_{\text{ev}} = p \times d - 1 \qquad \text{edge}_{\text{prob}} = p - \frac{1}{d} = \frac{\text{edge}_{\text{ev}}}{d} \qquad \text{edge} \le t \iff d \le b
 ```
 
-The edge definition is provisional until the bet engine confirms it (D3). It is consistent with the edge monitor's break-even rule: because *b* is rounded down (5.3), a 4-decimal price at or below *b* is exactly a price whose edge, computed from unrounded inputs, is at or below the publishing threshold *t*. With p = 0.55 and t = 0, 1.8181 gives an edge of −0.000045 (closed) and 1.8182 gives +0.00001 (narrowing).
+Two edge bases are in use. A pick's selection basis and threshold *t* come from its producer and decide *b* (5.3). The card's `entry.edge` and `current.edge` use one display basis for every sport, chosen in D3; until then the provisional display basis is expected value, p × d − 1. The BFF converts a producer's edge to the display basis from p and the price, and converts units: observed on dev, the NBA engines publish probability edge in percentage points (4.2 means 0.042). On either basis, because *b* is rounded down (5.3), a 4-decimal price at or below *b* is exactly a price whose edge, computed from unrounded inputs, is at or below *t*. With p = 0.55 and t = 0, 1.8181 gives an edge of −0.000045 (closed) and 1.8182 gives +0.00001 (narrowing).
 
 | Value | Rule | Owner | Who else MAY compute it |
 | --- | --- | --- | --- |
-| `entry.edge` | p × entry price − 1, at first publish | Bet engine | Nobody |
-| `edge_holds_above` | *b* = (1 + t) / p, as odds | Edge owner | BFF, only with *t* supplied by the producer, never hard-coded |
-| `current.edge`, line unchanged | p × current price − 1 | Edge owner | BFF, same formula |
-| `current.edge`, line moved | P(selection at the new line) × current price − 1 | Edge owner | Nobody; null if not supplied |
+| `entry.edge` | On the display basis (D3), at the entry price, at first publish; the BFF converts basis and units only | Bet engine | Nobody |
+| `edge_holds_above` | *b* on the pick's selection basis (5.3), as odds | Edge owner | BFF, only with *t* and the selection basis supplied by the producer, never hard-coded |
+| `current.edge`, line unchanged | On the display basis, at the current price | Edge owner | BFF, same formula |
+| `current.edge`, line moved | On the display basis, with P(selection at the new line) and the current price | Edge owner | Nobody; null if not supplied |
 | `edge_state` | Section 5.3 | Live edge monitor | Another system for uncovered sports, passing section 10.3 |
 | `action` | Product thresholds on current edge | Bet engine | Nobody; null until D4 |
 | `status_reason.message` | Copy for each reason code | BFF | Nobody |
@@ -313,7 +319,7 @@ Which picks a free user sees in full follows the existing freemium rules unchang
 | `edge` | `entry.edge`, `current.edge`, `action`; `edge_state` becomes `unknown` | `show_xo_edge` |
 
 - A group is hidden when its flag is not explicitly true. A field in a hidden group MUST be null in the response; the app shows a lock, never a zero.
-- Probability, odds and edge are linked by edge = p × d − 1 (current edge and current odds the same way), so any two give away the third. Either none of these three groups is hidden, or at least two are. When exactly one would be hidden, the BFF also hides the edge group if that one is probability or odds, and the probability group if that one is edge. Groups added this way are listed in `access.hidden`.
+- Probability, odds and edge are linked on either basis in 6.1 (current edge and current odds the same way), so any two give away the third. Either none of these three groups is hidden, or at least two are. When exactly one would be hidden, the BFF also hides the edge group if that one is probability or odds, and the probability group if that one is edge. Groups added this way are listed in `access.hidden`.
 - The BFF applies this rule to every response, whatever the configuration, so a settings change cannot reintroduce the leak. Because a configuration that hides exactly one of the three groups then displays differently from what it says, the freemium settings review SHOULD warn about such a configuration.
 - `access.locked` is true when any group is hidden, and `access.hidden` lists every hidden group.
 - `entry.source` and `current.source` (the book name) belong to no group, so a locked card still shows which book the pick is against. Product confirms this in D11.
@@ -341,7 +347,7 @@ Observation: the live edge monitor writes two nodes per pick in the realtime dat
 | `/edgePickStatus/{league}_{id}` | `edge_status`, `as_of` | `edge_state`, `current.observed_at` |
 | `/edgePicks/{league}_{id}` | `pick_id`, `live_price`, `live_point`, `edge_status`, `as_of`, `next_update_due` | `current.odds` (decimal; American derived per 6.1), `current.line`, `edge_state`, `current.observed_at` |
 
-- Overlay nodes are published under the snapshot's `overlay_key`. While D6 keeps readable keys, that key is `{sport}_{id}` with `id` exactly equal to `EdgePick.id`. Overlay records that match no snapshot key are ignored.
+- Overlay nodes are published under the snapshot's `overlay_key`. The BFF and the overlay owner derive it from the pick id with one shared function whose output is a valid realtime database key (none of `.`, `$`, `#`, `[`, `]`, `/` or control characters): `{sport}_` followed by the base64url encoding of the id while D6 keeps non-secret keys, or the D6 opaque key. Overlay records that match no snapshot key are ignored.
 - `edge_status` takes only the four values `live`, `narrowing`, `closed` and `suspended`, with the meanings in 5.3. Any other value is treated as `unknown`.
 - `next_update_due` is the overlay's staleness signal: once it has passed by more than 15 minutes, the app treats the overlay as stale (5.3, AC-42). The app MUST NOT use it for anything else.
 - The overlay watches the book the pick was published against, so `current.source` after a merge is `entry.source` unless the overlay names another book.
@@ -385,16 +391,20 @@ Target: one Cosmos document per game for game picks and one for player picks, wi
 
 ### 8.2 Pick identifiers
 
+Formats observed today (observations, not requirements):
+
 | Pick kind | Id format | Example |
 | --- | --- | --- |
 | Game | `{game_sk}_{bet_type}_{region}`, region lowercase | `300019484_FAV_SPR<_au` |
 | Player | `{game_sk}\|{player_sk}\|{stat}\|{type}\|{region}` | `300019484\|300123456\|RecYDs\|player_over\|us` |
+| NBA game (split documents, app-data dev) | `{game_sk}\|{market}_{selection}\|{selection}\|{line}\|{variant}\|full\|{region}`; line is null for moneyline | `40021717862\|spread_t1\|t1\|-4.5\|main\|full\|us` |
+| NBA player (split documents, app-data dev) | `{game_sk}\|{player_sk}\|{stat}\|{type}\|{line}\|{variant}\|full\|{region}` | Contains the line as written, for example 24.5 |
 
-- The same id MUST be used by every system: Cosmos documents, the audit log, edge overlay keys, My Picks and the snapshot.
+- The same id MUST be used by Cosmos documents, the audit log, My Picks and the snapshot. Realtime overlays use `overlay_key`, derived from the id (7.2).
 - An id MUST NOT change when the price or line moves, and MUST be unique within a region and day.
-- If two picks could share game, market (or player and stat) and side at different lines, for game picks such as alternate spreads as well as player picks, the producer MUST add the line to the id before that can happen.
-- Ids MUST NOT contain `.`, `$`, `#`, `[`, `]`, `/` or control characters, so they can be realtime database keys. They may contain `<` and `|`, and are URL-encoded wherever they appear in a URL.
-- Ids are frozen in this format through Phase 2; the structured fields in 8.3 do not change them. Any later change is breaking for every system, and users' saved My Picks slips reference ids, so it needs an agreed migration plan before any producer changes.
+- An id MUST include the line wherever two picks could share game, market (or player and stat) and side at different lines, such as alternate spreads and player props.
+- Ids are opaque strings: no consumer parses them. They may contain any printable character, including `.`, `<` and `|`. They are URL-encoded in URLs and never used directly as realtime database keys.
+- Changing a producer's id format breaks saved My Picks slips and follows, so it ships with a migration that keeps old ids resolvable (for example a `legacy_ids` list on each pick) until saved references are rewritten. The canonical data model's line-aware id is the proposed target; the decision record that settles it also settles this section.
 
 ### 8.3 Fields
 
@@ -405,10 +415,10 @@ Target: one Cosmos document per game for game picks and one for player picks, wi
 | `market`, `side` | enums as in 4.2 | Replace encoded codes such as `FAV_SPR<` and `T1_9.5_1.95` | Ask (1B) |
 | `line` | number or null | Entry line, sign convention in 4.3 | Ask (1B) |
 | `team_sk`, `player_sk`, `stat_code` | integer, integer, string | Backed team or player's team; one stat code list for all sports | Partly exists |
-| `probability`, `projection_value`, `projection_unit` | number, number, string | Model output at the entry line | Exists |
+| `probability`, `projection_value`, `projection_unit` | number, number, string | Model output at the entry line | Probability exists. Projection value and unit: Ask; today the BFF derives projections and drops any producer value, and player projections arrive as 2-decimal strings |
 | `pick_date_time` | ISO UTC | First publish, on every pick including player picks | 1A; WNBA player picks: Ask |
 | `entry_decimal_odds`, `entry_american_odds` | number, integer | Price at first publish | 1A |
-| `entry_edge`, `ev_threshold` | number, number | Edge at entry; the threshold *t* the pick was published under | 1A; `ev_threshold`: Ask |
+| `entry_edge`, `edge_basis`, `edge_threshold` | number, ev / prob, number | Edge at entry as a fraction on the producer's basis; the basis the pick was selected on; the threshold t it was published under (5.3, 6.1) | Edge: NBA today, as probability edge in percentage points; others 1A. Basis and threshold: Ask (1A) |
 | `stake_units` | number | Fixed at first publish | 1A |
 | `odds_source_kind`, `entry_bookmaker_id` | enum, lowercase id | `bookmaker` with an id such as `fanduel`, or `market_average` with null | Ask (1A) |
 | `current_decimal_odds`, `current_american_odds`, `current_line`, `current_odds_source_kind, current_bookmaker_id` | number, integer, number, enum, lowercase id | Latest observed market for this selection | 1A sends odds only; line and book: Ask |
@@ -425,13 +435,15 @@ This requires the history table to have its change data feed enabled (the Publis
 
 ### 8.4 Status vocabulary
 
-Producers MUST send only values from one agreed list, and every system that checks or filters on status MUST accept that list before any producer sends a new value. The roadmap's list (`active`, `cancelled`, `expired`, `settled`, `void`, `removed`) and the list the Publish Engine accepts for NBA today (`scheduled`, `active`, `pending`, `won`, `lost`, `push`, `void`, `cancelled`, `rescheduled`, `abandoned`) differ; D5 picks one. The BFF maps either through section 5.1.
+Producers MUST send only values from one agreed list, and every system that checks or filters on status MUST accept that list before any producer sends a new value. The roadmap's list (`active`, `cancelled`, `expired`, `settled`, `void`, `removed`) and a validator list reported on an NBA feature branch (`scheduled`, `active`, `pending`, `won`, `lost`, `push`, `void`, `cancelled`, `rescheduled`, `abandoned`) differ. That validator is not on app-data dev, where the Publish Engine checks no status: NBA game picks get scheduled, won, lost or push from the bet outcome, and NBA player picks and other sports pass the upstream value through. D5 picks one; the canonical data model proposes a third option, the contract's five statuses plus withdrawn sent at the source. The BFF maps whichever is chosen through section 5.1.
 
 ### 8.5 Schema rules
 
 1. Every value is typed and stands alone: numbers as numbers, no strings to parse, no display copy.
 2. A sport that cannot fill a field sends null; it never sends a different field.
 3. Adding a field does not change `schema_version`. Changing it requires the readers to be updated first, in a coordinated release. Consumers MUST NOT branch on an exact `schema_version` value.
+
+Observation (BFF `develop`, 19 Oct): the BFF branches on exact `schema_version` values today (for example `v1.10` in document selection), so rule 3 holds only after that BFF work is done.
 
 ### 8.6 Conformance
 
@@ -440,26 +452,39 @@ Producers MUST send only values from one agreed list, and every system that chec
 3. Before a sport switches to live data, the producer publishes test documents covering every status, edge state and market in that sport, and the BFF's contract tests pass against them.
 4. Changes start as a reviewed change to this spec, agreed by the app team, before any producer changes.
 
+Observation (19 Oct): none of these checks exists today. They are required, not built.
+
 ## 9. Cross-system dependencies and release coupling
 
-Several existing systems would break, or silently disagree, if one side changed without the others. Each row records an observation, the date it was last verified and what it was verified against, plus the requirement it forces. Tst serves production; there is no separate production environment, so observations are checked against each repository's `dev` and `tst` branches (the deploying branches), the deployment scripts and the data, never a default branch or a README. Owners re-verify their rows at every phase gate; progress on each action lives in the team tracker, not here. X1, X13 and X14 have hard dates.
+Several existing systems would break, or silently disagree, if one side changed without the others. Each row records an observation, the date it was last verified and what it was verified against, plus the requirement it forces.
 
-| # | Observation (verified 16 Oct) | Verified against | Risk if ignored | Required action | Owner | By |
+**Basis.** The redesign is designed, built and tested on each repository's dev branch, which deploys to the dev environment, and reaches users by promotion to the branch that deploys to tst (tst serves production; there is no separate production environment). Observations are therefore checked on the dev branch at a named commit from a fresh fetch, with the tst branch recorded for promotion tracking; never on a README, a default branch or a stale clone. Owners re-verify their rows at every phase gate; progress on each action lives in the team tracker, not here. X1, X13 and X14 have hard dates.
+
+| Repository | Dev branch (basis) | Promotes to tst via | Last checked |
+| --- | --- | --- | --- |
+| mobile-server (BFF) | `develop` | `main` (its prod-deploy workflow targets tst); `staging` deploys stg | `develop` at 9573301, fetched 16 Oct |
+| live-scores | `dev` | `tst` (holds only a README); `main` deploys prd | `dev` at 11599f1, fetched 16 Oct |
+| live-odds (edge monitor) | `dev` | None: no `tst` branch | `dev` at e2c04ca, fetched 15 Oct |
+| nba\_bet\_engine | `dev` | `tst` | `dev` at 0a339e6, fetched 16 Oct |
+| app-data (Publish Engine) | `dev` | `tst-blue` / `tst-green` (blue/green; tst-blue at a1c16f4, tst-green at e38a0eb) | `dev` at 2b6f998 (12 Oct), fetched 19 Oct |
+
+| # | Observation (verified 16–19 Oct) | Verified against | Risk if ignored | Required action | Owner | By |
 | --- | --- | --- | --- | --- | --- | --- |
-| X1 | The Publish Engine rejects unknown status values on the NBA path and fails the whole batch; the older path for other sports passes any value unchecked. The edge monitor watches only picks whose status is exactly `Scheduled` (case-sensitive) and deletes the overlays of every other pick. | Publish Engine code; monitor `dev` branch | Any new value, even lowercase `scheduled`, deletes every NFL overlay; `expired`, `settled` or `removed` stop NBA publishing | Ship together: the new status list, the Publish Engine's accepted list, a check on the older path, and a case-insensitive monitor filter driven by the agreed vocabulary, with a test. Unknown values alert, and the pick stays watched: its overlay is neither deleted nor frozen (D5, AC-31). The BFF does not send picks with unlisted statuses (5.1), and the staleness rule (5.3) is the backstop if an overlay stops updating | Bet engine, data engineering, monitor owner | Oct 31, 2026 |
+| X1 | The Publish Engine checks no status values on any path. NBA game picks get their status only from the bet outcome (won, lost, push, otherwise scheduled), so they can never be cancelled; NBA player picks and the older path for other sports pass the upstream value through. The edge monitor watches only picks whose status is exactly `Scheduled` (case-sensitive) and deletes the overlays of every other pick. | app-data dev at 2b6f998; monitor `dev` branch | Any new value, even lowercase `scheduled`, deletes every NFL overlay; `expired`, `settled` or `removed` reach the BFF unchecked; an NBA game pick on a cancelled game still shows as scheduled, and any NBA pick the engine withdraws before tip-off disappears instead of showing as cancelled | Ship together: the new status list, a Publish Engine check of the agreed list on every path (none exists on dev), NBA game picks carrying the engine's status rather than one derived only from the outcome, and a case-insensitive monitor filter driven by the agreed vocabulary, with a test. Unknown values alert, and the pick stays watched: its overlay is neither deleted nor frozen (D5, AC-31). The BFF does not send picks with unlisted statuses (5.1), and the staleness rule (5.3) is the backstop if an overlay stops updating | Bet engine, data engineering, monitor owner | Oct 31, 2026 |
 | X2 | The monitor builds game pick ids as `{bet_id}\|{region}` (`300019484_FAV_SPR<\|AU`); Cosmos uses `300019484_FAV_SPR<_au`. | Monitor `dev` branch; Publish Engine code | Game-pick overlays never match their cards | Monitor adopts the id rule in 8.2 (AC-32) | Monitor owner | Before overlays reach users |
 | X3 | The monitor discovers new picks once a day at 06:00 UTC. | Monitor `dev` branch | Picks published later in the day get no live state; mid-day cancellations linger | Discover at the publish cadence (hourly) or on publish (AC-33) | Monitor owner | Before overlays reach users |
 | X4 | In dev the monitor reads and writes the dev data catalog and the dev realtime database. Its tst configuration is incomplete (X14). Its prd settings are placeholders, which matters only once a separate production exists. | Monitor deployment script | A deployment with missing values runs against the wrong data or fails late | Deployments fail on any unset or placeholder value (AC-34) | Monitor owner | Before overlays reach users |
 | X5 | Realtime read rules for edge overlays are not defined in the monitor's repository; live scores allows any signed-in user to read at the root. | Both repositories | Free users can read every pick's live price and see which picks are locked | Meet 7.4 (D6) | Monitor owner, app team | Before overlays reach users |
 | X6 | Live data producers differ by sport and by branch; see the table below. | Deploying branches | Market Movement and live game state missing for most sports | Owners confirm what is deployed in tst per sport; coverage plan for edge state (D7); snapshot fallback meanwhile | Monitor owner, live scores owner, product | 1B planning |
-| X7 | NBA split documents carry the region map (fixed 8 Oct), but missing `edge` and other values pass through as null without failing. | Publish Engine code | Cards show no edge with no alert | Conformance checks in 8.6; pin the live catalog | Bet engine, data engineering | 1A |
+| X7 | NBA split documents carry the region map (fixed 8 Oct). On app-data dev (12 Oct), an NBA game or player pick with a null `edge` is dropped silently, and a document whose source has no edge field fails the run. | app-data dev at 2b6f998 | A game silently loses its picks, or a run fails late | Conformance checks in 8.6; pin the live catalog | Bet engine, data engineering | 1A |
 | X8 | MLB picks are decided on one book and struck at the best of three on the same line (in tst since 1 Oct). | Confluence decision record | One book name shown for a price from another book | Send a book per price (8.3) | Bet engine | 1A |
 | X9 | The WNBA player pick table has no publish time. | Table schema | No "Picked at" for WNBA player cards | Add `pick_date_time` | Bet engine | 1B |
 | X10 | A true AU average needs AU odds ingested first. | Roadmap | "Avg. Odds" shows US prices indefinitely | Plan AU odds ingestion; until then the label stays "Avg. Odds" over the US price (roadmap rule) | Data engineering, product | Phase 2 planning |
-| X11 | The league release gate applies per route. | BFF code | A staged season leaks through the new route | Apply the gate to `/v4/edge-picks` (4.4) | BFF | Before release |
+| X11 | The league release gate is applied in shared document readers, not per route: a staged league is withheld unless the request's api\_version major is 6 or more. A route that reads Cosmos directly inherits nothing from it. | BFF develop (gate.ts) | A staged season leaks through the new route | Apply the gate to `/v4/edge-picks` (4.4) | BFF | Before release |
 | X12 | The monitor's design rejects writing into Publish Engine documents (two writers, lock contention) and defers persisting final state to Cosmos. | Monitor design document | Snapshot current values and receipts have no source | The Publish Engine publishes the monitor's latest observation from its history table, with change data feed and a read grant (8.3, AC-35, AC-41) | Data engineering, monitor owner | 1B |
-| X13 | Phase 1A refreshes current odds hourly, but the document timestamp is the first publish time and no observation time is sent. | Roadmap | Stale odds look fresh; overlay merges compare against the wrong time | Send `observed_at` with current odds in 1A (AC-36); the app shows it and applies the staleness rule in 5.3 (AC-42) | Bet engine | Oct 31, 2026 |
-| X14 | Neither live service has code on the branch that deploys to tst, which serves production. The live scores `tst` branch holds only a README (30 Jun); its `dev` branch has MLB, NBA, NFL and WNBA. The edge monitor has no `tst` branch, and its tst settings are placeholders for the subscription, App Insights, managed identity and realtime database URL. The tst Azure subscription has no live scores or edge monitor resources: its resource groups are two for Data Factory and one each for inference, subscription reconciliation and subscription status. The tst Firebase project exists (the BFF's tst settings name it), but no one owns a realtime database in it for overlays and live scores. | Deploying branches; deployment scripts; tst Azure subscription; BFF tst settings | Market Movement, edge state and live game state cannot reach users; this is new infrastructure in tst, not a promotion of something already running | Name the owner of the tst realtime database; provision both services in tst (subscription, App Insights, managed identity, realtime database) and deploy them from their `tst` branches with complete configuration (AC-40); commit a delivery date. Blocks D1 option A (not A′), D7 and live game state | Monitor owner, live scores owner; realtime database owner to be named | Plan by Oct 23, 2026 Delivery date: to be committed |
+| X13 | Phase 1A refreshes current odds hourly, but the document timestamp is the first publish time and no observation time is sent for current odds. NBA picks on app-data dev carry market\_last\_update, the odds-feed time when the pick was made; it dates the entry price, not a current one. | Roadmap | Stale odds look fresh; overlay merges compare against the wrong time | Send `observed_at` with current odds in 1A (AC-36); the app shows it and applies the staleness rule in 5.3 (AC-42) | Bet engine | Oct 31, 2026 |
+| X14 | Neither live service has code on the branch that deploys to tst, which serves production. The live scores `tst` branch holds only a README (30 Jun); its `dev` branch has MLB, NBA (added 14 Oct), NFL and WNBA, although its README lists three. The edge monitor has no `tst` branch, and its tst settings are placeholders for the subscription, App Insights, managed identity and realtime database URL. The tst Azure subscription has no live scores or edge monitor resources: its resource groups are two for Data Factory and one each for inference, subscription reconciliation and subscription status. The tst Firebase project exists (the BFF's tst settings name it), but whether it has a realtime database for overlays and live scores, and who owns it, is not verified. | Deploying branches; deployment scripts; tst Azure subscription; BFF tst settings | Market Movement, edge state and live game state cannot reach users; this is new infrastructure in tst, not a promotion of something already running | Name the owner of the tst realtime database; provision both services in tst (subscription, App Insights, managed identity, realtime database) and deploy them from their `tst` branches with complete configuration (AC-40); commit a delivery date. Blocks D1 option A (not A′), D7 and live game state | Monitor owner, live scores owner; realtime database owner to be named | Plan by Oct 23, 2026 Delivery date: to be committed |
+| X15 | Each NBA engine run rebuilds a game's pick list from scratch, and the line is part of the pick id, so a pick that no longer qualifies, or whose line moved, simply disappears. The NBA 2026 Schema Specification (§5.2) makes this the rule: a superseded pick is absent from the next publish and never marked cancelled. No record of published picks or their entry is kept across runs, and the pick documents have no reason field. Game picks on a cancelled game stay scheduled (X1); player picks show cancelled, which here means the game was cancelled. | nba\_bet\_engine dev at 0a339e6; app-data dev at 2b6f998; NBA 2026 Schema Specification v6 | No cancelled card and no Market Movement after a line move for NBA; saved My Picks point at ids that vanish; the track record leaves out superseded picks | Keep a record of published picks with frozen entries and merge each run into it (5.1 Persistence, AC-45); amend the NBA schema so a withdrawn pick becomes cancelled with a reason and a line move keeps the pick; set game-pick status for cancelled games (5.1 mapping); thresholds per D14 | Bet engine, data engineering, NBA schema owners | Plan by Oct 23, 2026; before 1A ships cancelled status |
 
 **X6 detail: live data producers by sport** (tst serves production)
 
@@ -486,20 +511,20 @@ An implementation conforms when it passes every criterion below for its part of 
 5. **AC-5** A repeated request with the returned `ETag` gets `304`.
 6. **AC-6** Picks of a staged league are withheld from app builds below the release `api_version`.
 7. **AC-7** While AU shows US prices (roadmap rule), the BFF presents every AU source as `market_average` named "Avg. Odds", and moneyline wording is "Win". US users see the book's display name and "Moneyline".
-8. **AC-8** Every row of the mapping table in 5.1 produces the stated `status` and `result`; an unlisted value drops the pick and raises an alert; `removed` never appears.
+8. **AC-8** Every row of the mapping table in 5.1 produces the stated `status` and `result`; an unlisted value drops the pick and raises an alert; `removed` and withdrawn never appear.
 9. **AC-9** A postponed or cancelled game never shows `live`, whatever the time.
 
 ### 10.2 Free-user access (BFF)
 
 10. **AC-10** Subscribers: `access.hidden` is empty on every pick.
-11. **AC-11** Completed picks are unlocked for everyone; within each enabled sport, the configured number of top picks by probability is unlocked.
+11. **AC-11** Completed picks are unlocked for everyone; within each sport whose freemium enabled setting is true, the top\_pick\_count picks with the highest probability are unlocked, counting only picks inside top\_pick\_prob\_min to top\_pick\_prob\_max (inclusive) when both are set; completed picks are ranked too and keep their slots. Example: NFL with top\_pick\_count 1 and range 0.55 to 0.95, open picks at 0.97, 0.80 and 0.70: only the 0.80 pick is unlocked.
 12. **AC-12** Example: flags with only `show_market_odds` true. A locked pick has `hidden` = selection, probability, projection, stake, edge; `selection`, `entry.line`, `current.line`, `model.probability`, `model.projection`, `entry.stake_units`, `entry.edge`, `current.edge`, `action` and `edge_holds_above` are null; `entry.odds` is present; `edge_state` is `unknown`.
 
 ### 10.3 Edge state (any system computing it)
 
-Inputs for E1–E9 and E11: p = 0.55, t = 0, entry line 24.5, entry price 2.0000 (+100). So b = 1.8181 (−122) and m = 1.9091 (−110).
+Inputs for E1–E9, E11 and E12 (expected-value basis): p = 0.55, t = 0, entry line 24.5, entry price 2.0000 (+100). So b = 1.8181 (−122) and m = 1.9091 (−110).
 
-All comparisons use the 4-decimal precision rule in 5.3; E6, E8 and E11 test the boundaries.
+All comparisons use the 4-decimal precision rule in 5.3; E6, E8 and E11 test the price boundaries, E12 the null line and E13 the selection basis.
 
 | Case | Observation | Expected `edge_state` | Why |
 | --- | --- | --- | --- |
@@ -514,6 +539,8 @@ All comparisons use the 4-decimal precision rule in 5.3; E6, E8 and E11 test the
 | E9 | Moneyline (no line), price 1.7000 | `closed` | Below b; rule 3 does not apply |
 | E10 | As E7 but t = 0.02, so b = 1.8545 | `closed` | 1.8500 is below b |
 | E11 | Line 24.5, price 1.8182 | `narrowing` | One step above b: edge +0.00001 |
+| E12 | Moneyline (no line), price 2.0000 | `live` | Rule 3 does not apply to a null line; above m |
+| E13 | Line 24.5, price 1.9000, pick selected on probability edge with t = 0.03, so b = 1 / (0.55 − 0.03) = 1.9230 | `closed` | Below b. On an expected-value basis b would be 1.8727 and the state narrowing |
 
 ### 10.4 Derived values
 
@@ -529,17 +556,19 @@ All comparisons use the 4-decimal precision rule in 5.3; E6, E8 and E11 test the
 | D-8 | p 0.55, line moved, no producer value | current edge null |
 | D-9 | 2 units, standard bet $10, entry −115 | bet size $20.00, payout $37.39 |
 | D-10 | 1 unit, standard bet $10, entry −110 | bet size $10.00, payout $19.09 |
+| D-11 | p 0.58, price 1.9091, probability display basis | entry edge 0.0562 |
+| D-12 | Producer edge 5.0 (percentage points, probability basis), p 0.55, entry 2.0000 | entry edge 0.0500 on the probability display basis; 0.1000 on the expected-value display basis |
 
 ### 10.5 Realtime overlays (overlay owner and app)
 
-13. **AC-13** For every monitored pick with a non-null overlay\_key, overlay nodes are published under the snapshot's overlay\_key; while D6 keeps readable keys, that key is `{sport}_{id}` with `id` byte-for-byte equal to the snapshot's.
+13. **AC-13** For every monitored pick with a non-null `overlay_key`, overlay nodes are published under exactly the snapshot's `overlay_key`, derived by the shared function in 7.2.
 14. **AC-14** The app applies an overlay value only when it is newer than `current.observed_at`, and keeps the snapshot value when a node is missing.
 15. **AC-15** A signed-in user cannot list `/edgePicks` or `/edgePickStatus`; a free user cannot read an overlay field hidden for that pick by 6.2.
 16. **AC-16** After kickoff the overlay nodes are gone and the next snapshot carries the last pre-kickoff observation with `is_closing` true.
 
 ### 10.6 Mock scenarios (BFF mock mode)
 
-A conforming mock mode serves these scenarios, with every record internally consistent (entry edge = p × entry price − 1, at 4 decimal places):
+A conforming mock mode serves these scenarios, with every record internally consistent (entry edge on the display basis of 6.1, at 4 decimal places):
 
 - **Full design day:** all five sports; game and player picks; every `status`; every `edge_state`; a moved line with a producer edge; a same-line price move; a pick with no observation yet; a cancellation with `lineup_change`; a void with `game_void`; a push; an `awaiting_result` pick in a live game.
 - **Phase 1A day:** the same picks limited to what Phase 1A supplies: current line equal to the entry line wherever current odds are present, no current odds for picks whose line moved, no producer current edge, `action` and `status_reason` null, `observed_at` taken from the producer's observation time (one pick more than 2 hours old, so stale), and current null where a producer sends none.
@@ -555,11 +584,11 @@ A conforming mock mode serves these scenarios, with every record internally cons
 
 ### 10.8 Further criteria
 
-21. **AC-21** With `show_market_odds` and `show_xo_edge` true but `show_xo_probability` false, a locked pick also hides the edge group: `entry.edge` and `current.edge` are null and `access.hidden` includes `edge`.
+21. **AC-21** With `show_market_odds` and `show_xo_edge` true but `show_xo_probability` false, a locked pick also hides the edge group, with every field AC-12 lists for it (action null, edge\_state unknown): `entry.edge` and `current.edge` are null and `access.hidden` includes `edge`.
 22. **AC-22** The production configuration refuses mock mode at startup; no production response has `source` set to `mock`.
 23. **AC-23** The app hides Rec. Action when `action` is null, and shows no current edge when an overlay price is newer than the snapshot and carries no `live_edge`.
 24. **AC-24** Entry line 24.5 and current line 24.50 count as the same line.
-25. **AC-25** Pick ids are unique within a region and day and contain none of the forbidden characters in 8.2.
+25. **AC-25** Pick ids are unique within a region and day; every overlay\_key is a valid realtime database key (7.2), including for ids that contain a line such as -4.5.
 26. **AC-26** A client write to any overlay node is rejected.
 27. **AC-27** While the screen is visible, the app requests the snapshot at most once every 60 seconds and always sends `If-None-Match`.
 28. **AC-28** For every combination of the 5 statuses and 7 game states, the card follows the rules in 5.4 (a table-driven test over all 35 combinations).
@@ -572,29 +601,32 @@ A conforming mock mode serves these scenarios, with every record internally cons
 34) **AC-34** In each environment the monitor reads and writes only that environment's data catalog and realtime database; a deployment with an unset or placeholder value fails.
 35) **AC-35** Only the Publish Engine writes edge pick documents; the monitor's credentials have no write access to them.
 36) **AC-36** Every producer record with current odds carries `observed_at`; a record without it fails producer CI, and the BFF never shows such odds.
-37) **AC-37** Mirror leaks: with probability and edge shown but odds hidden, the edge group is hidden too; with probability and odds shown but edge hidden, the probability group is hidden too. In both cases `access.hidden` lists the added group.
+37) **AC-37** Mirror leaks: with probability and edge shown but odds hidden, the edge group is hidden too (entry.edge, current.edge and action null, edge\_state unknown); with probability and odds shown but edge hidden, the probability group is hidden too (model.probability and edge\_holds\_above null). In both cases `access.hidden` lists the added group.
 38) **AC-38** A locked pick whose edge group is hidden keeps `edge_state` `unknown` and `current.edge` null after any overlay update.
 
 39. **AC-39** When the user's entitlement changes, the app re-requests the snapshot at once and holds no subscription for a pick whose `overlay_key` is null.
 40. **AC-40** Each live service in use is deployed to tst from its `tst` branch with no placeholder settings, and a tst smoke test shows a monitored pick's price and a live game's state updating.
 41. **AC-41** A new row in the monitor's history table reaches the edge pick document within 5 minutes, and `is_closing` is true only on the last observation before the game's start.
 42. **AC-42** The app shows the observation time in Market Movement, and marks the box stale and hides the edge state indicator when `current.observed_at` is more than 2 hours old or an overlay's `next_update_due` passed more than 15 minutes ago; a fresh observation clears the stale mark.
+43. **AC-43** Each overlay detail field maps one-to-one onto a `current` field with the same meaning and units (7.2), and the card renders the same values identically whichever path delivered them.
+44. **AC-44** A new contract minor version passes the previous minor version's contract tests and sample responses unchanged; a rename, removal or change of meaning ships only under a new route major.
+45. **AC-45** Across consecutive publishes of a game's pick documents before settlement, no pick id disappears except one that became withdrawn, and every pick's `picked_at` and `entry` fields equal their first-publish values. Test: publish a pick, move its line and drop its edge below the threshold in the next run; the pick is still present, `open` (or `cancelled` with a reason), with its original entry.
 
 ### 10.9 Conformance matrix
 
 | Criteria | Component that must pass | Phase gate it blocks |
 | --- | --- | --- |
 | 10.6 scenarios | BFF mock mode | Start of the app build (now) |
-| AC-1 to AC-9, AC-22, AC-30, D-1 to D-8 | BFF | App release of the new screen |
+| AC-1 to AC-9, AC-22, AC-30, AC-44, D-1 to D-8, D-11, D-12 | BFF | App release of the new screen |
 | AC-10 to AC-12, AC-21, AC-37 | BFF free-user access | App release of the new screen |
 | D-9, D-10, AC-23, AC-27 to AC-29, AC-39, AC-42 | App | App release of the new screen |
 | AC-36 | Bet engine, Publish Engine | Phase 1A (31 Oct) |
-| AC-17 to AC-20, AC-25, AC-35 | Bet engine, Publish Engine | Each sport's switch to live data |
+| AC-17 to AC-20, AC-25, AC-35, AC-45 | Bet engine, Publish Engine | Each sport's switch to live data |
 | AC-24, AC-41 | Publish Engine, BFF | Receipts after kickoff (1B) |
 | AC-40 | Edge monitor, live scores service | Launch gate X14: blocks D1 option A (not A′), D7 and live game state |
-| E1 to E11 | Edge monitor, and any other edge-state producer (the BFF under option A′) | Showing edge state for that sport |
+| E1 to E13 | Edge monitor, and any other edge-state producer (the BFF under option A′) | Showing edge state for that sport |
 | AC-13, AC-15, AC-16, AC-26, AC-31 to AC-34 | Edge monitor (overlay owner) | Overlays reaching users |
-| AC-14, AC-38 | App overlay merge | Overlays reaching users |
+| AC-14, AC-38, AC-43 | App overlay merge | Overlays reaching users |
 
 ## 11. Phasing and the Market Movement escalation
 
@@ -613,12 +645,12 @@ The contract unblocks the app today, but it does not by itself deliver the redes
 
 | Option | What it takes | Result at launch |
 | --- | --- | --- |
-| A′. Ship Market Movement on 1A data | Nothing beyond 1A: current price, observation time and book at the entry line. For sports with no monitor, the BFF derives the same-line current edge (6.1) and edge state by the rules of 5.3 except rule 3, which needs the current line; both subject to the staleness rule. Becomes A with no contract change | Price and its age on every sport, edge state at hourly freshness; nothing live until X14 |
+| A′. Ship Market Movement on 1A data | Nothing beyond 1A except each producer's selection basis and t (D3): current price, observation time and book at the entry line. For sports with no monitor, the BFF derives the same-line current edge (6.1) and edge state by the rules of 5.3 except rule 3, which needs the current line; both subject to the staleness rule. Becomes A with no contract change | Price and its age on every sport, edge state at hourly freshness; nothing live until X14 |
 | A. Ship Market Movement | `current_line`, `observed_at` and the book in 1A; edge state for all sports by 1B (extend the monitor, or compute it in the engine's runs to section 5.3) | Line, price and edge state shown; Rec. Action hidden until D4 |
 | B. Ship it per sport | Nothing new; show the box only where a source exists | NFL cards differ from the rest |
 | C. Defer the box | Nothing new | The redesign launches without its headline feature |
 
-Recommendation: A′ now, staged into A once X14 has a delivery date. A′ needs nothing beyond 1A and shows every sport's price with its age, going stale honestly when data stops. A adds the line after a move, live updates and monitor edge state with no contract change. Options A and B both depend on X14: the live services must be provisioned and deployed in tst, which serves production, and until X14 has a committed delivery date A cannot be a launch commitment.
+Recommendation: A′ now, staged into A once X14 has a delivery date. A′ needs nothing beyond 1A except each producer's selection basis and t (D3), and shows every sport's price with its age, going stale honestly when data stops. A adds the line after a move, live updates and monitor edge state with no contract change. Options A and B both depend on X14: the live services must be provisioned and deployed in tst, which serves production, and until X14 has a committed delivery date A cannot be a launch commitment.
 
 ### 11.3 Iterating in dev
 
@@ -633,16 +665,16 @@ Tst serves real users, so parallel work happens in dev, which is also used for t
 
 ## 12. Open decisions
 
-Thirteen decisions shape the build; D5 is the most urgent because the status change ships on 31 Oct. Until a decision is made, mocks and implementations follow the recommendation.
+Fourteen decisions shape the build; D5 is the most urgent because the status change ships on 31 Oct. Until a decision is made, mocks and implementations follow the recommendation.
 
 | # | Decision | Recommendation | Owner | Needed by |
 | --- | --- | --- | --- | --- |
 | D1 | Does Market Movement ship at launch? (11.2) Options A and B are blocked by X14; A′ is not | A′ now; staged into A once X14 has a delivery date | Product, bet engine | Oct 23, 2026 |
-| D2 | Line move rule: `closed` on any move, or only on a move against the pick? | Decide from worked examples in both directions; the design's +2% Play after a move needs the engine's edge at the new line | Product, monitor owner | Oct 23, 2026 |
-| D3 | Exact edge formula and the threshold *t* | Confirm p × d − 1 and publish *t* with every pick | Bet engine | Oct 23, 2026 |
+| D2 | Line move rule: `closed` on any move, or only on a move against the pick? | Decide from worked examples in both directions; the design's +2% Play after a move needs the engine's edge at the new line. Either way a line move never cancels a pick: it closes the edge (5.3 rule 3), and the engine may issue a new pick on the new line, so there is no line\_moved cancellation reason | Product, monitor owner | Oct 23, 2026 |
+| D3 | Edge bases: the card's display basis, and each producer's selection basis and threshold *t* | Producers send their selection basis and *t* with every pick (8.3); product picks one display basis for every sport. Provisional: expected value. NBA cards show probability edge today, so either choice changes one sport's numbers | Bet engine | Oct 23, 2026 |
 | D4 | Play / Watch / Pass thresholds, or drop Rec. Action from launch | Product sets thresholds on current edge; null until then | Product | Nov 2, 2026 |
 | D5 | One status vocabulary (8.4) | Keep the roadmap list; update the Publish Engine list and monitor filter in the same release (X1) | Bet engine, data engineering, monitor owner | Oct 21, 2026 |
-| D6 | How overlays enforce free-user access (7.4) | Opaque per-pick keys issued in the snapshot only for unlocked picks. These need a key derivation shared by the BFF and the monitor (for example an HMAC of the pick id with a shared secret); entitlement claims in the read rules need no such coupling | Monitor owner, app team | Nov 2, 2026 |
+| D6 | How overlays enforce free-user access (7.4) | Entitlement claims checked by database rules, bounded by the token lifetime. If opaque keys are chosen instead, they MUST expire: for example an HMAC of the pick id and a daily epoch, with a secret shared by the BFF and the monitor, so the epoch bounds the window in 7.4. A fixed key never expires and does not meet 7.4 | Monitor owner, app team | Nov 2, 2026 |
 | D7 | Who supplies edge state for NBA, MLB, WNBA and EPL | Extend the monitor; otherwise the engine computes it to 5.3 and passes 10.3 | Monitor owner, bet engine | Nov 2, 2026 |
 | D8 | NBA data path | Split documents; pin the live catalog and add conformance checks (X7) | Bet engine, data engineering | Oct 23, 2026 |
 | D9 | Stake units | 1 unit = the user's standard bet | Product | Oct 23, 2026 |
@@ -650,5 +682,6 @@ Thirteen decisions shape the build; D5 is the most urgent because the status cha
 | D11 | Card treatment matrix (5.4), edge state copy and colours, and whether locked cards show the book name (6.2) | Adopt 5.4: only cancelled is greyed out; locked cards show the book name | Product, design | Oct 30, 2026 |
 | D12 | Free users when a sport is switched off | Show cards fully locked, per the freemium rules | Product | Oct 30, 2026 |
 | D13 | Cutoff that moves a pick to `awaiting_result` | At game start, matching when the monitor stops | Product, bet engine | Oct 23, 2026 |
+| D14 | What makes the engine cancel an open pick (size of probability move, market move, lineup change, book pulled), per sport (X15) | Bet engine proposes a threshold per reason code; product agrees; every engine applies them the same way and records the reason | Bet engine, product | Oct 30, 2026 |
 
 **Sources:** [Edge Picks redesign](https://xosports.atlassian.net/wiki/spaces/PB/pages/726237185/Edge+Picks+redesign) (Confluence, updated 9 Oct) · [Bet Engine Roadmap](https://claude.ai/artifact/FX29b7SibKX5gx1SiyLpvH) (13 Oct) · live edge monitor design and repository (live-odds, `dev` branch, 3 Oct) · live scores mobile integration guide (live-scores, `main`) · Publish Engine container references and NBA split-document code (app-data, as of 16 Oct).
