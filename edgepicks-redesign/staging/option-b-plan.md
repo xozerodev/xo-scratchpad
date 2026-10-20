@@ -72,6 +72,7 @@ When this plan is done:
 | 2 | The legacy strip always nulls `bookmaker` on locked picks (`resolve/locked-pick-response.ts:202-217`), so a block that keeps its odds source would reveal more than today | §4.3 (sources null when locked), BE-6, V-SEC-1 |
 | 3 | The pick funnel drops `cancelled` picks (`common.ts:252`, `canonical/picks.ts:529,757`), so the redesign's cancelled card can't come from documents | BE-11 (P4); mock scenario in P1 |
 | 4 | `POST /my-picks-v2` stores no snapshot and checks nothing (`my-picks-create-v2.ts:24-29`); an item whose pick leaves the list becomes a placeholder with `decimal_odds 0`, which makes the whole slip's odds and return 0 (`resolve-my-picks-list.ts:277-296`, `my-pick.ts:183-206`) | MP-1, MP-2 |
+| 4a | `POST /my-picks-v2` has no entitlement check, and locked picks keep their `id` on the list. If the save captured a snapshot and returned it, or My Picks showed locked items to their owner, a free user could post any locked id and read the pick | MP-1, MP-4, V-SEC-3 |
 | 5 | Store build 1.1.66 multiplies `item.bookmaker.bet_odds.decimal_odds` on the device (`PickGroupCard.tsx:60-72` at `main/1.1.66`); snapshot rows have no `bookmaker`, and live NBA 2026 rows carry an array `bookmaker`, so it shows NaN | MP-2 |
 | 6 | My Picks reads `item.outcome` (`MyPicksItem.tsx:101`), but live rows carry only `pickOutcome`; only snapshot and placeholder rows set `outcome` (`snapshot.ts:371`). Completed live legs therefore render as a cross. Void and push share code 2 and render as a tick on snapshot rows | MP-5, FE-7 |
 | 7 | Free and lapsed users lose a saved item whose pick is missing (`freemium/apply/my-picks.ts:65`) or listed but locked (`:86-94`) | MP-4 |
@@ -200,7 +201,7 @@ Also on every locked pick: `entry.source` and `current.source` are null. Leak ru
 
 - Status and result: settled ⇒ won, lost or push; void ⇒ void; otherwise null. `status_reason` only on cancelled or void.
 - Era: legacy ⇒ `picked_at`, `selection`, `current`, `edge_holds_above` null, `edge_state` unknown, status never cancelled, reason only `game_void`. v4 ⇒ `picked_at` set.
-- Groups: each hidden group's fields null; each visible group's values set, except legacy `entry.line` and `entry.source`, which may be null. `access.locked` false ⇒ `hidden` empty. Unlike the snapshot contract, `access.locked` true with void status is allowed (legacy keeps postponed games locked).
+- Groups: each hidden group's fields null; each visible group's values set, except legacy `entry.line` and `entry.source`, which may be null. `access.locked` false ⇒ `hidden` empty. Unlike the snapshot contract, the block schema has **no** "completed picks are never locked" rule: a settled or void pick may be locked when the legacy lock says so (the legacy bypass goes by game status, so a pick graded before its game ends, or a postponed game's pick, can stay locked; R3). Don't reuse `pickRuleViolations` from `v4.schema.ts` for blocks.
 - Line rule (v4 era, selection visible): moneyline, draw, btts and yes/no props have no line; spread needs a line; over/under needs a positive line.
 - Observation: no `current` ⇒ `edge_state` unknown; `suspended` ⇒ `current` with odds, line and edge null.
 
@@ -239,7 +240,7 @@ Everything new runs inside `loadOrigin` in `src/functions/matches-top-prediction
 | File | Change |
 | --- | --- |
 | `src/contracts/edge-picks/edge-pick-block.schema.ts` | NEW. zod `EdgePickBlockSchema` from the v4 sub-schemas (`OddsSchema`, `OddsSourceSchema`, `CurrentSchema` with nullable `source`, the enums), plus `blockRuleViolations()` for §4.3 |
-| `src/contracts/edge-picks/producer-record.schema.ts` | NEW. zod schema of the producer pick record 4.0.0 (37 fields, `conf-schema-contracts.md` §6, §9) and the §9.1 invariants as a separate `recordInvariantViolations(record, { checkIdFormula })` |
+| `src/contracts/edge-picks/producer-record.schema.ts` | NEW. zod schema of the producer pick record 4.0.0 (37 fields, `conf-schema-contracts.md` §6, §9) and the §9.1 invariants as a separate `recordInvariantViolations(record, { checkIdFormula, checkEntryAmericanFormula })` (both default `true`) |
 | `src/lib/edge-picks/v7/config.ts` | NEW. Settings of §5.3; `blocksEnabledFor(apiVersionMajor)`, `recordSourceKind()`, `isV4League(league)` (env list plus Redis kill switch), `mockParams(request)` |
 | `src/lib/edge-picks/v7/record-source.ts` | NEW. `PickRecordSource` interface and factory |
 | `src/lib/edge-picks/v7/mock/generate.ts` | NEW. The generator of §8.3, shared by the mock source, the sample exporter and the seeding script |
@@ -310,10 +311,11 @@ A legacy block that can't satisfy the schema (no probability, no price, no stake
 const ALL_BLOCK_GROUPS = ["selection", "odds", "probability", "stake", "edge"] as const;
 
 export function attachEdgePicks(body, blocks, ctx /* getFreemiumContext() */) {
-  const seen = countIds(body.top_picks);                 // detect duplicates
+  // ids whose copies differ in content (identical copies are allowed and share one block)
+  const conflicting = idsWithDifferingCopies(body.top_picks);
   for (const pick of body.top_picks) {
     const raw = blocks.get(String(pick.id));
-    if (!raw || seen.get(String(pick.id)) > 1) {
+    if (!raw || conflicting.has(String(pick.id))) {
       if (raw) report("duplicate_id", pick);
       pick.edge_pick = null;
       continue;
@@ -335,6 +337,7 @@ function lockedGroups(pick, ctx) {
 }
 ```
 
+- Duplicate ids in one response (seen in seed `100077282`, where one player pick is listed twice): if every copy has identical content, attach the same block to each; if copies differ, attach null to all and report `duplicate_id`. Adjust the pseudocode's duplicate check accordingly.
 - Completed picks and subscriber picks carry no `locked`; unlocked active picks carry `locked: false`. Both give unlocked blocks.
 - Postponed games are not in the legacy bypass list (`completed-bypass.ts`), so a postponed game's pick can be locked. The block follows the legacy lock (R3).
 
@@ -378,13 +381,13 @@ Server-only; every build benefits. Independent of v7; start now.
 
 | Id | Change | Files | Done when |
 | --- | --- | --- | --- |
-| **MP-1** | `POST /my-picks-v2` captures a snapshot per item, like `POST /v3/my-picks`. First extract the inline snapshot logic of `my-picks-create-v3.ts:93-123` into a shared helper. Add `releaseStagedContentMiddleware` to the v2 create route (today `[globalErrorMiddleware, authMiddleware]`, `my-picks-create-v2.ts:42`), or staged NBA 2026 picks never get a snapshot (`common.ts:149`). Peers load once per game; match by `id` or `bet_id`. If the peer load fails, store the item without a snapshot and log (no new validation, no new failure mode). Never accept a client-sent snapshot | `my-picks-create-v2.ts`, `my-picks-create-v3.ts`, new `lib/my-pick/capture-snapshot.ts` | Every resolvable item saved through v2 has a snapshot; the response's `my_pick` gains `snapshot` (additive) |
+| **MP-1** | `POST /my-picks-v2` captures a snapshot per item, safely. (1) First extract the inline peer-load, availability and snapshot logic of `my-picks-create-v3.ts:64-123` into a shared helper. (2) Add `releaseStagedContentMiddleware` and `entitlementMiddleware` to the v2 create route (today `[globalErrorMiddleware, authMiddleware]`, `my-picks-create-v2.ts:42`); without the first, staged NBA 2026 picks never get a snapshot (`common.ts:149`). (3) Load peers once per game; match by `id` or `bet_id`. (4) For a free user, compute `findUnavailableMyPickItemIds(items, peersByGameId)` (`freemium/apply/my-picks.ts`) and capture a snapshot **only** for available items; unavailable items are stored without a snapshot, as today (no new rejection, so no new failure mode for any build). Subscribers get a snapshot for every resolvable item. (5) Write `snapshot.captured_for` = `"subscriber"` or `"free_unlocked"` with each snapshot. (6) The response body never contains `snapshot`: strip it from `my_pick.items` before returning (the app checks only for status 200). (7) If the peer load fails, store the items without snapshots and log. Never accept a client-sent snapshot | `my-picks-create-v2.ts`, `my-picks-create-v3.ts`, new `lib/my-pick/capture-snapshot.ts` (also used by `POST /v3/my-picks`, which then writes `captured_for` too) | Subscribers' resolvable items have snapshots; a free user's locked item has none; no response contains `snapshot` (V-SEC-3) |
 | **MP-2** | Store-build-safe rows. The snapshot fallback already exists (`lookupResolvedPick` → `hydratePickFromSnapshot`, `resolve-my-picks-list.ts:60-62`). Add: every My Picks row (live and snapshot) carries an object `bookmaker: { name, bet_odds: { decimal_odds, american_odds } }` built from the first bookmaker (keep `bookmaker_options` as is; main reads either shape through `resolveBookmaker`). An item with neither live pick nor snapshot is returned with `unavailable: true`, odds null, and the slip's `totalOdds`, `totalOddsAmerican`, `returnAmount` null instead of 0 | `resolve-my-picks-list.ts:274-296`, `snapshot.ts` (`hydratePickFromSnapshot`), `my-pick.ts:183-206` | 1.1.66 shows prices and totals for live NBA 2026, Format A and snapshot rows; main shows "—" for unknown totals (`pickGroupAmounts.ts` handles null) |
-| **MP-3** | Backfill: one-off script writes a snapshot for every slip item without one whose pick still resolves. Dry run prints counts per league. Run in dev, tst, production, before each league's Stage A | `script/my-picks/backfill-snapshots.ts` | Before/after counts; no other field changed |
-| **MP-4** | Owner visibility (decision D3): a saved item resolved from its snapshot (`is_snapshot: true` on the resolved row, `snapshot.ts:372`) is shown to its owner, and so is a listed item whose peer is locked. Without a snapshot and without a peer, keep today's fail-closed rule | `freemium/apply/my-picks.ts:59-94` | A lapsed subscriber sees every item they saved |
-| **MP-5** | Results and payout. (a) Set `outcome` on live rows from `pickOutcome` (0, 1, 2), so My Picks stops showing completed live legs as crosses. (b) Add an additive `result` per item: `won`, `lost`, `push`, `void`, `cancelled`, `pending`. Code 2 is `push` when the market is a spread or total on a whole-number line, else `void`; `cancelled` comes from the producer record (P4; never set `pick_status: "cancelled"`, because `buildMyPickSlipResponse` drops such items, `my-pick.ts:9-25`). (c) Compute `totalOdds` and `returnAmount` with void, push and cancelled legs at 1.0; keep `returnAmount` as the projected return (not zeroed on a loss), as today. (d) When `c-outcome` has no row, take the outcome from the producer record by pick id once a record source exists | `resolve-my-picks-list.ts`, `snapshot.ts:299-316`, `my-pick.ts` | Void leg: footer return equals the stake-adjusted product in both builds. 1.1.66 computes the summary "Return" on the device (`PickGroupCard.tsx:156` at the tag), which keeps using item prices; accepted (D2) |
+| **MP-3** | Backfill: one-off script writes a snapshot for every slip item without one whose pick still resolves, with `captured_for: "backfill"` (not eligible for MP-4's owner visibility, because no entitlement check ran). Dry run prints counts per league. Run in dev, tst, production, before each league's Stage A | `script/my-picks/backfill-snapshots.ts` | Before/after counts; no other field changed |
+| **MP-4** | Owner visibility (decision D3), bound to what the user was entitled to see when they saved: an item whose live peer is missing or now locked is shown to its owner **only** if its stored snapshot carries `captured_for` `"subscriber"` or `"free_unlocked"` (written by MP-1 after the entitlement and availability check; `"backfill"` does not count). Items without such a snapshot keep today's rule: a free user sees an item only when its peer is an unlock winner (`freemium/apply/my-picks.ts:59-94`). The resolved row needs the flag: carry `snapshot_captured_for` onto the row in `hydratePickFromSnapshot` and onto live rows from the stored item | `freemium/apply/my-picks.ts:59-94`, `snapshot.ts`, `resolve-my-picks-list.ts` | A lapsed subscriber sees every item they saved while subscribed; a free user who posted a locked id sees nothing more than today (V-SEC-3) |
+| **MP-5** | Results, completion and payout, in `buildMyPickSlipResponse` (`my-pick.ts:162-213`) and the row builders. (a) Set `outcome` on live rows from `pickOutcome` (0, 1, 2), so My Picks stops showing completed live legs as crosses. (b) Add an additive `result` per item: `won`, `lost`, `push`, `void`, `cancelled`, `pending`. Code 2 is `push` when the market has a whole-number line (spread, total or over/under prop, as A.4), else `void`; `cancelled` comes from the producer record (P4; never set `pick_status: "cancelled"`, because `buildMyPickSlipResponse` drops such items, `my-pick.ts:9-25`). (c) Slip completion: today a slip is complete only when every leg's game status is exactly `"Completed"` (`my-pick.ts:196`), so a slip with a `Cancelled` game never completes. A leg is finished when its game status is `Completed`, `Cancelled`, `Canceled` or `Abandoned`, or its `result` is not `pending`; the slip is complete when every leg is finished. (d) Compute `totalOdds` and `returnAmount` with void, push and cancelled legs at 1.0; keep `returnAmount` as the projected return (not zeroed on a loss), as today (D8). (e) Read leg probability as `probability ?? xoProbability` (live rows carry no `xoProbability`, so `combinedProbability` is always 1 today; both app builds recompute it on the device, so this is a correctness fix with no visible change). (f) When `c-outcome` has no row, take the outcome from the producer record by pick id once a record source exists | `my-pick.ts`, `resolve-my-picks-list.ts`, `snapshot.ts:299-316` | A void leg counts as 1.0 in the footer return in both builds; a slip with a cancelled game moves to Completed. 1.1.66 computes the summary "Return" on the device (`PickGroupCard.tsx:156` at the tag), which keeps using item prices; accepted (D2) |
 | **MP-6** | Make My Picks version-safe: change `apiVersion === "v3"` (`my-picks-v2.ts:89`) **and** `entitlementWhenApiVersionV3` (`entitlement-middleware.ts:171`) to `apiVersionMajor(...) >= 3` | both files | `?api_version=v7` takes the modern path with entitlement: subscribers unfiltered, free users filtered |
-| **MP-7** | Follow topics: replace `\|` with `_` in `queue-fcm-device.ts:40,54` as `target-follow.ts:62` does; one-off job re-subscribes existing devices | `queue-fcm-device.ts`, `script/follows/resubscribe.ts` | Re-registering a device with a pick follow succeeds |
+| **MP-7** | Follow topics: replace `\|` with `_` in `queue-fcm-device.ts:40,54` as `target-follow.ts:63` does; one-off job re-subscribes existing devices | `queue-fcm-device.ts`, `script/follows/resubscribe.ts` | Re-registering a device with a pick follow succeeds |
 | **MP-8** | Region: pass the auth user into `resolveMyPicksListForUser` (signature change) and use `resolveUserRegion(authUser)` (token fallback) instead of `normalizeRegion(user?.region ?? "")` | `resolve-my-picks-list.ts:71-89` and callers | A user with no stored region resolves in their token region |
 
 ---
@@ -397,12 +400,13 @@ Base: `feat/XTP-125-Edge-Picks-Redesign-Oct26`. The card, slip, follows and filt
 | --- | --- | --- | --- |
 | **FE-1** | Types for `edge_pick` and `edge_pick_meta`, generated from mobile-server `docs/edge-picks-v7/edge-pick-block.schema.json` with `json-schema-to-typescript`. Add `edge_pick?: EdgePickBlock \| null` to `TopPickCardData` | new `app/services/edgePicks/edgePickBlock.ts` (the untracked `type.ts` on a local main checkout is not on XTP-125), `TopPickCard.types.ts` | Types compile; regenerated on each contract change |
 | **FE-2** | Send v7: set `DEFAULT_API_VERSION = "v7"`. This moves top picks, `/games` and `/game` to v7 (the server treats v7 as v6 there). Keep My Picks hard-coded at v3 (R5); add a comment and a unit test asserting the My Picks URL contains `api_version=v3` | `useAppConfig.ts:42`, `myPicks.service.ts:25` | Games, game detail and My Picks regression tests pass |
-| **FE-3** | Card inputs from the block when `edge_pick` is present: price chip original = `entry.odds`, current = `current.odds` (drop the guessed top-level `current_*` reads); probability bar = `edge_pick.probability`; `EdgeValueBadge` `edge = entry.edge`, `currentEdge = current.edge` (fractions; don't apply `toEdgePercent` heuristics to block values); edge-state indicator from `edge_state`; "Edge holds above" from `edge_holds_above`; status chip and message from `status`, `status_reason.message`; result chip from `result` | `EdgePicksCard.tsx`, `bookmakerOdds.ts`, `EdgeValueBadge.tsx`, `ProbabilityBar` usage | Card matches the design for every scenario in §8.4 |
+| **FE-3** | Card inputs from the block when `edge_pick` is present: price chip original = `entry.odds`, current = `current.odds` (drop the guessed top-level `current_*` reads); probability bar = `edge_pick.probability`; `EdgeValueBadge` `edge = entry.edge`, `currentEdge = current.edge` (fractions; don't apply `toEdgePercent` heuristics to block values); edge-state indicator from `edge_state`; "Edge holds above" from `edge_holds_above`; status chip and message from `status`, `status_reason.message`; result chip from `result` | `EdgePicksCard.tsx`, `bookmakerOdds.ts`, `EdgeValueBadge.tsx`, `ProbabilityBar` usage. The chip receives a hand-built `bookmakerOddsPick` object (`EdgePicksCard.tsx:93-101` on XTP-125), not the pick: add `edge_pick` to `BookmakerOddsPick` (`bookmakerOdds.ts:16-24`) and pass `edge_pick: pick.edge_pick` there | Card matches the design for every scenario in §8.4 |
 | **FE-4** | Variants: `edge_pick` missing or null ⇒ today's card; `era !== "v4"` ⇒ limited card (no current price, no edge state, no "holds above", price labelled "Published price", no picked-at time); `era === "v4"` ⇒ full card | `EdgePicksCard.tsx` | Snapshot tests for null, legacy and v4 |
 | **FE-5** | Locks: for each group in `edge_pick.access.hidden` show a lock in place of the block's field; never compute a hidden value from visible ones. Top-level `locked` and `locks` keep driving the legacy fields. Do **not** change `resolveLocks.ts:53` (`locks?.topPicks` is the key the server sends) | `EdgePicksCard.tsx` | Free-user snapshots show locks and no hidden values |
-| **FE-6** | Slip: Add (both the footer button and the price chip, which is also pressable) is enabled only when `edge_pick` is null (today's rule) or `edge_pick.status === "open"`. `newOdds` = `edge_pick.entry.odds` as `{decimal_odds, american_odds}` when present, else today's `bookmaker.bet_odds`. Moneyline exclusivity: copy the removal logic of `GameScreen/_components/GamePick.tsx:68-79` into `EdgePicksCard`, keyed on `edge_pick.selection.market === "moneyline"` (fallback: `isH2hPick`), and pass `bet_type: "h2h"` | `EdgePicksCard.tsx:120-165, 256-287` | Can't add cancelled, settled or void picks; adding the other moneyline side of a game replaces the first; slip total equals the saved total |
-| **FE-7** | My Picks: render `result` when present (else `outcome`): `won` tick, `lost` cross, `void`/`push`/`cancelled` neutral, `pending` none; a neutral leg doesn't mark the group lost; `unavailable: true` items show "Pick no longer available" with "—" odds | `MyPicksItem.tsx:101`, `PickGroupCard.tsx:56-60` | A slip with a void leg shows it neutral and grades the group on the rest |
+| **FE-6** | Slip: one `canAddPick` rule gates both the footer Add button and the price chip (today the chip is disabled only while the subscription is loading, `EdgePicksCard.tsx:260`, so it can add a completed game's pick). With a block: `edge_pick.status === "open"` (a postponed game stays open, D7). Without a block: today's footer rule (game status is not `Completed`), now applied to the chip too. `newOdds` = `edge_pick.entry.odds` as `{decimal_odds, american_odds}` when present, else today's `bookmaker.bet_odds`. Moneyline exclusivity: copy the removal logic of `GameScreen/_components/GamePick.tsx:68-79` into `EdgePicksCard`, keyed on `edge_pick.selection.market === "moneyline"` (fallback: `isH2hPick`), and pass `bet_type: "h2h"` | `EdgePicksCard.tsx:120-165, 256-287` | Can't add cancelled, settled or void picks; adding the other moneyline side of a game replaces the first; slip total equals the saved total |
+| **FE-7** | My Picks: render `result` when present (else `outcome`): `won` tick, `lost` cross, `void`/`push`/`cancelled` neutral, `pending` none. Group badge on a completed slip: lost if any leg is lost; else won if at least one leg is won; else neutral (every leg void, push or cancelled); `unavailable: true` items show "Pick no longer available" with "—" odds | `MyPicksItem.tsx:101`, `PickGroupCard.tsx:56-60` | A slip with a void leg shows it neutral and grades the group on the rest |
 | **FE-8** | Dev affordance: in dev builds only, a debug menu that appends `edge_pick_scenario`, `edge_pick_era`, `edge_pick_seed`, `edge_pick_now` to the top-picks request | dev menu, `toppicks.service.ts` | QA switches scenarios on device |
+| **FE-9** | Settled outcome on the card: `CardOutcomeFooterRow` gets `outcome={null}` hard-coded (`EdgePicksCard.tsx:284` on XTP-125). Wire it from `edge_pick.result` (`won` ⇒ `correct`, `lost` ⇒ `incorrect`, `push` ⇒ `push`, `void` ⇒ `void`), falling back to `mapPickOutcome(pick.pickOutcome)` when there is no block. Add `push` to `PredictionOutcome` (`app/utils/predictionOutcome.ts`, today `correct`/`incorrect`/`void`) and to `PredictionOutcomeIndicator` | `EdgePicksCard.tsx`, `app/utils/predictionOutcome.ts`, `app/components/common/PredictionOutcomeIndicator.tsx` | Settled cards show won, lost, push and void |
 
 The app must tolerate `edge_pick` missing entirely (an older BFF, or `source: off`). That makes the release order of BFF and app independent.
 
@@ -447,14 +451,15 @@ Module: `src/lib/edge-picks/v7/mock/generate.ts`, shared by the mock source (L1)
 
 1. **Selection:** `legacy-selection.ts` (Appendix A.5). Unmappable ⇒ no record (legacy block); report `unmappable_legacy` once per `bet_type`.
 2. **Identity:** `pick_id = pick.id` unchanged (R7); `region`, `sport = league`, `game_sk`, `pick_kind`, `team_sk`, `player_sk`, `stat_code` (legacy stat mapped to the contract vocabulary, e.g. `pts`, `reb`, `ast`, `threes`; unknown ⇒ lower-cased legacy stat).
-3. **Entry:** `entry_decimal_odds` and `entry_american_odds` = the document's price as written (R6); `stake_units` = the pick's stake; `odds_source_kind` = `market_average` for AU, else `bookmaker` with `entry_bookmaker_id` = bookmaker id or slug.
-4. **Probability and basis.** Default basis `ev`, threshold 0. For NBA game picks whose probability-basis edge (`p − 1/d`) exceeds 0.02, use basis `prob`, threshold 0.02, so the prob-basis break-even path is exercised. **Mock-only adjustment:** if `p × d − 1 ≤ 0.01` (no real edge at the document's price, common in the dev player data), set `probability = min(0.95, round4(1.03 / d))`. The block's probability then differs from the top-level legacy probability; the card uses the block's (FE-3). Count adjusted picks in a debug log.
+3. **Entry:** `entry_decimal_odds` = the document's decimal price rounded half away from zero to 4 places (db-seeds carry 16-decimal floats such as `1.7874015748031495`). `entry_american_odds` = the document's American price **as written** (R6: it is what the top-level fields, the slip and My Picks show), even where it does not match the conversion rule: in the dev NBA data 760 of 1,070 picks don't (e.g. 1.85 with −111, where the rule gives −118). `stake_units` = the pick's stake (0 is valid). `odds_source_kind` = `market_average` for AU; for US, `bookmaker` with `entry_bookmaker_id` = bookmaker id or slug when the document names a bookmaker, else `market_average` with no bookmaker id (MLB seeds have `bookmaker.name: null`; never invent a bookmaker name).
+4. **Probability and basis.** `probability` = the document's probability rounded to 4 places. Default basis `ev`, threshold 0. For NBA game picks whose probability-basis edge (`p − 1/d`) exceeds 0.02, use basis `prob`, threshold 0.02, so the prob-basis break-even path is exercised. **Mock-only adjustment:** if `p × d − 1 ≤ 0.01` (no real edge at the document's price, common in the dev player data), set `probability = min(0.95, round4(1.03 / d))`. The block's probability then differs from the top-level legacy probability; the card uses the block's (FE-3). Count adjusted picks in a debug log.
 5. **`pick_date_time`:** the game's document timestamp (`picks_updated_at ?? timestamp`) minus `rng(pickId,"t") × 2 h`. Fixed for the life of the data (R10).
 6. **Lifecycle:** `legacyLifecycle(pick, game, now)` (Appendix A.4) gives the starting status and result. For code 2 the push/void rule of A.4 applies.
 7. **Scenario.** Eligible picks: status `open` and the game not started. `mixed` assigns deterministically first, then by weight:
    - Sort the day's eligible picks in the region by `pick_id`. The first nine get, in order: `live`, `narrowing`, `closed`, `line_moved`, `suspended`, `no_observation`, `cancelled` (`probability_moved`), `cancelled` (`market_moved`), `cancelled` (`lineup_change`). If a pick isn't eligible for its scenario (table below), it takes the next scenario it is eligible for.
    - The rest draw by weight with `rng(pickId,"s")`: live 30%, narrowing 15%, closed 10%, line_moved 10%, suspended 5%, no_observation 20%, cancelled 10%.
    - A forced `edge_pick_scenario` applies to every pick eligible for it.
+   - **Started picks** (status `awaiting_result`, `settled` or `void` from step 6) get a closing observation too, so settled and in-play cards show a closing price: a scenario drawn with `rng(pickId,"c")` from live 35%, narrowing 20%, closed 15%, line_moved 15%, no_observation 15%, subject to the same eligibility. `cancelled` and `suspended` are never assigned to started picks. A forced observation scenario (`live`, `narrowing`, `closed`, `line_moved`, `no_observation`) also applies to started picks.
 8. **Observation per scenario** (all prices rounded half away from zero to 4 places before use; `b4 = edgeHoldsAbove(...).decimal`, `m = roundHalfAway((entry + b) / 2, 4)` with unrounded b):
 
    | Scenario | Eligible when | Observation | Expected `edge_state` |
@@ -466,14 +471,14 @@ Module: `src/lib/edge-picks/v7/mock/generate.ts`, shared by the mock source (L1)
    | `suspended` | always | price and line null (pulled) | suspended |
    | `no_observation` | always | none | unknown |
    | `cancelled` | always | as `closed`; status `cancelled` with the assigned reason | closed |
-   | `settled_push` (forced only) | game completed, spread or total | status `settled`, result `push` | as observed |
+   | `settled_push` (forced only) | game completed, market with a line (spread, total, over/under prop) | status `settled`, result `push` | as observed |
    | `void` (forced only) | any | status `void`, result `void`, reason `game_void` | as observed |
 
    After building, check with `deriveEdgeState`; a mismatch is a generator bug (test V-MOCK-3).
-   `observed_at` = min(now, start − 1 min) − rng × 30 min. For started games the observation has `is_closing: true`.
+   `observed_at` = min(now, start − 1 min) − rng × 30 min. `is_closing` = the game has started **and** an observation exists (`observed_at` not null); with no observation, `is_closing` is false (contract §9.1 invariant 4).
 9. **Drift** (`EDGE_PICK_MOCK_DRIFT=on`): for `live` and `narrowing`, the price moves by ±0.0100 per 5-minute bucket of `now` (rng salted with the bucket), clamped inside its scenario band. Entry values never change.
 10. **Phantom cancelled picks (for BE-11 in P4):** for one game in three (`fnv1a(game_sk) % 3 == 0`), one extra cancelled record copied from a listed game pick with a line market, its line moved by 1, and its `pick_id` rebuilt with the producer formula. These are not in the documents. The P1 mock source does not return them unless injection is built.
-11. **Validate** every record with `producer-record.schema.ts`. Mock records skip the id-formula invariant (`checkIdFormula: false`) because ids are reused as they are (Format A ids such as `2001_H2H_us`, NBA milestone ids); phantom records check it. A failure is a generator bug: throw in tests, report in dev.
+11. **Validate** every record with `producer-record.schema.ts`. Mock records skip two invariants, because they copy legacy values on purpose: the id formula (`checkIdFormula: false`; ids are reused as they are, e.g. Format A `2001_H2H_us`, NBA milestone ids, and one seed US bucket that holds an `|au` id) and the American-price formula for the **entry** price (`checkEntryAmericanFormula: false`; R6 keeps the document's American). Every other invariant applies, including the formula for `current_american_odds`, which the generator derives. Phantom records (step 10) check everything, with the entry American derived by the rule. A failure is a generator bug: throw in tests, report in dev.
 
 ### 8.4 Coverage guarantees
 
@@ -528,36 +533,37 @@ Commit the outputs and regenerate them whenever the block, the generator or the 
 | --- | --- | --- | --- |
 | **V-UNIT-1** | Existing derive vectors (D-1…D-11, E1…E13) stay green | unit | P1 |
 | **V-UNIT-2** | Block schema: every rule in §4.3 has a passing and a failing case; Appendix B examples validate | unit | P1 |
-| **V-UNIT-3** | Legacy mapping per family: NBA canonical game and player (including milestones), Format A game per league (old NBA list shape, MLB, NFL H2H, EPL draw and BTTS, `FAV_SPR<`/`UD_SPR>` line signs), Format A player (MLB numeric `position`); `bet_outcome` `"1.0"`, `"0"`, `1`, `2`; missing bookmaker name; American price kept as written | unit | P1 |
+| **V-UNIT-3** | Legacy mapping per family: NBA canonical game and player (including milestones), Format A game per league (old NBA list shape, MLB, NFL H2H, EPL draw and BTTS; spreads from `code` including `2002_FAV_SPR_us` and `31679_FAV_SPR<`; `37_H2H` with null `bet_line`; the block's side and line agree with the pick's `pickDescription`), Format A player (MLB numeric `position`); `bet_outcome` `"1.0"`, `"0"`, `1`, `2`; missing bookmaker name; American price kept as written | unit | P1 |
 | **V-UNIT-4** | `attachEdgePicks` locks: subscriber, completed pick, unlocked active (`locked: false`), locked with sport enabled (each flag combination), sport disabled, missing config (fails closed); sources null when locked | unit | P1 |
-| **V-UNIT-5** | Producer schema and §9.1 invariants: the contract's five example records pass; one broken invariant each fails; `checkIdFormula: false` skips only the id check | unit | P1 |
+| **V-UNIT-5** | Producer schema and §9.1 invariants: the contract's five example records pass; one broken invariant each fails; `checkIdFormula: false` and `checkEntryAmericanFormula: false` each skip only their own check | unit | P1 |
 | **V-UNIT-6** | `legacyLifecycle` table (A.4), including postponed (stays open) and cancelled games, code 2 push/void rule | unit | P1 |
 | **V-MOCK-1** | Determinism: two runs with the same fixture, `now` and seed are deep-equal; `picked_at` is identical for two different `now` values; a different seed changes the `mixed` assignment beyond the first nine | unit | P1 |
 | **V-MOCK-2** | Coverage on the golden day: every edge state, every cancel reason; forced `settled_push` and `void` produce their states | unit | P1 |
-| **V-MOCK-3** | Every generated record validates; every forced scenario yields its expected `edge_state` for every pick eligible for it | unit | P1 |
+| **V-MOCK-3** | Every generated record validates (with the two mock exemptions); every forced scenario yields its expected `edge_state` for every pick eligible for it; started picks have closing observations; no record has `is_closing: true` without `observed_at`; prices and probabilities have at most 4 decimals; entry American equals the document's | unit | P1 |
 | **V-INV-1** | **Coexistence invariant:** for each fixture day × region × {subscriber, free with three flag sets, sport disabled}: v6 has no `edge_pick` or `edge_pick_meta` anywhere; the v7 body minus `edge_pick`, `edge_pick_meta` and injected items, with `count` recomputed, deep-equals the v6 body (`locks` included: injected picks must not change it) | integration (seeded emulator) | P1 |
 | **V-INV-2** | Every non-null block validates; ids unique; `edge_pick.access.locked === (pick.locked === true && !subscriber)` | integration | P1 |
 | **V-SEC-1** | **Leak sweep:** in every free-user response, no field of a hidden group is non-null in any block; sources null on locked picks; `selection` hidden on every locked pick; leak rule holds | integration | P1 |
 | **V-SEC-2** | Mock parameters are ignored and don't bypass the cache unless `EDGE_PICK_MOCK_PARAMS=on`; the production guard (§5.3) forces `none` | unit | P1 |
+| **V-SEC-3** | **Slip-save security:** a free user posts `POST /my-picks-v2` with the ids of locked picks (taken from a free-user v7 list): the response has no `snapshot` and no pick values; the stored items have no snapshot; `GET /my-picks-v2?api_version=v3` for that user returns no locked item's values. A subscriber doing the same gets snapshots stored and sees every item after lapsing to free | integration | P2 |
 | **V-CACHE-1** | Free-user cache: v6 and v7 bodies under separate keys; an honoured mock-parameter request is neither served from nor written to the cache; body size of the largest fixture day under 512 KiB or reported | integration | P1 |
 | **V-ERR-1** | Fault injection: a record source that throws ⇒ legacy blocks, status 200, one report; one invalid block ⇒ null for that pick only | unit | P1 |
 | **V-REG-1** | `/games` and `/game` at v7 deep-equal v6 for the fixture days | integration | P1 |
 | **V-RT-1** | **Round trip, list → slip → My Picks:** for every v7 pick in a fixture day, `POST /my-picks-v2` with its id, then `GET /my-picks-v2?api_version=v3`: the item resolves with the same id, the same entry price (decimal and American) and the list's game | integration | P2 |
-| **V-RT-2** | Pick leaves the list after save (remove it from the document): the item resolves from its snapshot with an object `bookmaker.bet_odds`; slip totals not 0; a free user who saved it still sees it (MP-4) | integration | P2 |
+| **V-RT-2** | Pick leaves the list after save (remove it from the document): the item resolves from its snapshot with an object `bookmaker.bet_odds`; slip totals not 0; a user who saved it while subscribed still sees it after lapsing to free (MP-4) | integration | P2 |
 | **V-RT-3** | No snapshot and no live pick: `unavailable: true`, totals null | integration | P2 |
-| **V-RT-4** | Results: live completed legs carry `outcome`; void and push legs count as 1.0 in `totalOdds` and `returnAmount`; `result` set | integration | P2 |
+| **V-RT-4** | Results: live completed legs carry `outcome`; void and push legs count as 1.0 in `totalOdds` and `returnAmount`; `result` set, including push on a whole-number prop line; a slip with a `Cancelled` game and graded other legs is complete | integration | P2 |
 | **V-RT-5** | Store-build contract: every My Picks row satisfies what 1.1.66 reads (`bookmaker.bet_odds.decimal_odds` number, `probability` number, `outcome` number or null) for live NBA 2026, Format A, snapshot and unavailable rows | integration | P2 |
 | **V-RT-6** | `GET /my-picks-v2?api_version=v7` takes the modern path: a subscriber is not filtered, a free user is (MP-6) | integration | P2 |
 | **V-APP-1** | App snapshot tests per card variant × scenario × lock state, from the §8.6 samples | app unit | P3 |
-| **V-APP-2** | Slip: Add disabled for non-open blocks (button and chip); moneyline exclusivity; slip total equals the entry product; My Picks `result`, void/push and unavailable rendering | app unit | P3 |
+| **V-APP-2** | Settled card outcomes incl. push (FE-9); slip: Add disabled for non-open blocks and, without a block, for completed games (button and chip); moneyline exclusivity; slip total equals the entry product; My Picks `result`, void/push and unavailable rendering | app unit | P3 |
 | **V-E2E-1** | Device QA on dev with L1 (checklist §9.3) | manual | P3 |
 | **V-LIVE-1** | P4: L2 container with several BFF instances: one Cosmos rebuild per key per minute; kill switch flips a league to legacy on the next uncached request | integration on dev | P4 |
-| **V-LIVE-2** | P4 shadow: for one week of NBA Stage A in the shadow containers, every derived-document pick has a record with the same id and entry price (`record_mismatch` = 0) | data check | P4 |
+| **V-LIVE-2** | P4 shadow: for one week of NBA Stage A in the shadow containers, every derived-document pick has a record with the same id and entry price (`record_mismatch` = 0), and real records pass every invariant, including the entry American-price formula, so the derived documents' American prices also match the rule (the dev mock data's mismatches must not reach real data) | data check | P4 |
 
 ### 9.2 Acceptance criteria per phase
 
-- **P1 done:** V-UNIT-*, V-MOCK-*, V-INV-*, V-SEC-*, V-CACHE-1, V-ERR-1, V-REG-1 pass in CI; dev BFF deployed with `EDGE_PICK_BLOCKS=on`, `EDGE_PICK_SOURCE=mock`; tst deployed with `EDGE_PICK_BLOCKS=on`, `EDGE_PICK_SOURCE=none`; samples committed; the app team confirms they can load every scenario.
-- **P2 done:** V-RT-* pass; MP-3 dry run reviewed and applied in dev and tst.
+- **P1 done:** V-UNIT-*, V-MOCK-*, V-INV-*, V-SEC-1, V-SEC-2, V-CACHE-1, V-ERR-1, V-REG-1 pass in CI; dev BFF deployed with `EDGE_PICK_BLOCKS=on`, `EDGE_PICK_SOURCE=mock`; tst deployed with `EDGE_PICK_BLOCKS=on`, `EDGE_PICK_SOURCE=none`; samples committed; the app team confirms they can load every scenario.
+- **P2 done:** V-RT-* and V-SEC-3 pass; MP-3 dry run reviewed and applied in dev and tst.
 - **P3 done:** V-APP-*, V-E2E-1 pass; release build sends v7 and keeps My Picks at v3.
 - **P4 done (per league):** V-LIVE-1, V-LIVE-2; KDD-002 gate list green for the league; product sign-off on the behaviour changes.
 
@@ -594,7 +600,7 @@ Estimates are for one developer who knows the codebase. Branches: BFF `feat/edge
 | MK-1 | Generator §8.3 with determinism and coverage | BE-3, BE-5 (shares `legacy-selection`, `lifecycle`) | 2 d |
 | MK-2 | Fixture days: NBA 2026-10-22 and 2026-10-25 from `nba_mock_data_2weeks.json`; real MLB and old-NBA Format A exports; EPL and NFL seeds; a hand-written push/void fixture | — | ½ d |
 | MK-3 | `export-v7-samples.ts`, README, commit samples | BE-6, MK-1, MK-2 | 1 d |
-| BE-7 | Tests V-UNIT-*, V-MOCK-*, V-INV-*, V-SEC-*, V-CACHE-1, V-ERR-1, V-REG-1 | all above | 2 d |
+| BE-7 | Tests V-UNIT-*, V-MOCK-*, V-INV-*, V-SEC-1, V-SEC-2, V-CACHE-1, V-ERR-1, V-REG-1 | all above | 2 d |
 | BE-8 | Dev and tst deploy: Terraform settings, App Insights query, body-size check, smoke test on game `40021717855` | BE-7 | ½ d |
 | MK-5 | Roll the dev NBA data forward before 2026-11-03 (re-run `build_nba_mock_14days.py` with a new start date and `inject_nba_mock_cosmos.py`), then every two weeks until real NBA data is in dev | data engineering or BFF | ½ d each time |
 
@@ -602,11 +608,11 @@ Estimates are for one developer who knows the codebase. Branches: BFF `feat/edge
 
 ### 10.2 BFF, P2 (parallel)
 
-MP-1 (2 d, incl. extracting the v3 helper), MP-2 (1½ d), MP-3 (1½ d), MP-4 (½ d), MP-5 (1½ d; part (d) after BE-10), MP-6 (½ d), MP-7 (1 d), MP-8 (½ d), tests V-RT-* (1½ d). **About 10½ days.**
+MP-1 (2½ d, incl. extracting the v3 helper, the entitlement check and `captured_for`), MP-2 (1½ d), MP-3 (1½ d), MP-4 (½ d), MP-5 (1½ d; part (f) after BE-10), MP-6 (½ d), MP-7 (1 d), MP-8 (½ d), tests V-RT-* and V-SEC-3 (2 d). **About 11½ days.**
 
 ### 10.3 App, P3
 
-FE-1 (½ d), FE-2 (½ d), FE-3 (1 d), FE-4 (½ d), FE-5 (½ d), FE-6 (1 d), FE-7 (½ d), FE-8 (½ d), V-APP-* and QA (1 d). **About 6 days**, starting when samples land.
+FE-1 (½ d), FE-2 (½ d), FE-3 (1 d), FE-4 (½ d), FE-5 (½ d), FE-6 (1 d), FE-7 (½ d), FE-8 (½ d), FE-9 (½ d), V-APP-* and QA (1 d). **About 6½ days**, starting when samples land.
 
 ### 10.4 BFF and data engineering, P4 (live, NBA first)
 
@@ -623,7 +629,7 @@ FE-1 (½ d), FE-2 (½ d), FE-3 (1 d), FE-4 (½ d), FE-5 (½ d), FE-6 (1 d), FE-7
 ### 10.5 P5 follow-ups
 
 - **BE-14** Format A extra game picks at v7: for v4-era games, add record-only game picks (not in `top_picks[region]`) through BE-11's mapping and lock rule. Requires MP-1/MP-2 so saving one is safe. Product decides whether launch needs it (D5).
-- Apply product decisions D1–D6 (§12).
+- Apply product decisions D1–D8 (§12).
 
 ---
 
@@ -657,11 +663,12 @@ None of these touches data or affects store builds.
 | --- | --- | --- |
 | D1 | Slip price: entry or current | Entry (R6) |
 | D2 | Store build: a push or void leg can only show tick or cross, and its summary "Return" is computed on the device | Tick on snapshot rows, outcome 2 on live rows (also a tick); footer return correct (MP-5) |
-| D3 | A saved slip item always shows to its owner, even when locked or no longer listed | Yes (MP-4) |
+| D3 | A saved slip item shows to its owner, even when now locked or no longer listed | Yes, but only items saved while the user was entitled to see them (snapshot with `captured_for`, MP-1/MP-4) |
 | D4 | Grading a slip leg whose pick XO cancelled | `result: cancelled` in the new app (neutral), counted as 1.0; no grading until the engine settles cancelled selections |
 | D5 | Format A leagues need more than one game pick per game at launch | No (BE-14 later) |
 | D6 | Limited-card copy and whether legacy cards show an edge | "Published price"; edge shown |
 | D7 | A postponed game's pick: open (the market stays live, as legacy treats it) or void | Open until the game is cancelled or graded (A.4) |
+| D8 | A slip with a lost leg: show the projected return (today) or 0 | Projected return, unchanged (MP-5) |
 
 ### 12.2 Risks
 
@@ -685,7 +692,7 @@ None of these touches data or affects store builds.
 | Approval for a read-only tst snapshot (§8.2) | data engineering |
 | KDD-001 container name per environment and the BFF's read identity | data engineering |
 | Bookmaker display-name map and its owner (slug → name) | BFF, product |
-| Exact meaning of `FAV_SPR<`, `FAV_SPR>`, `UD_SPR<`, `UD_SPR>` (which side, which sign); confirm against `top-pick.ts` formatting and the engine | BFF, bet engine |
+| What `FAV_SPR<`, `FAV_SPR>`, `UD_SPR<`, `UD_SPR>` mean, and why seed `code` and `bet_line` disagree on side (`31679_FAV_SPR<`). The plan follows `code`, as the card description does; confirm with the engine | BFF, bet engine |
 | Update KDD-003 and `kdd23-design.md` to option B | contract owner |
 
 ---
@@ -758,7 +765,7 @@ Inputs: the pick's `pickOutcome` (0, 1, 2 or null; from `bookmaker.bet_outcome`,
 | Raw status `Cancelled`, `Canceled` or `Abandoned` | `void` | `void` | `game_void` |
 | `pickOutcome` 1 | `settled` | `won` | null |
 | `pickOutcome` 0 | `settled` | `lost` | null |
-| `pickOutcome` 2, spread or total on a whole-number line | `settled` | `push` | null |
+| `pickOutcome` 2, and the market has a line (spread, total, over/under player prop) that is a whole number | `settled` | `push` | null |
 | `pickOutcome` 2, otherwise | `void` | `void` | null |
 | Raw status `Postponed` | `open` (D7) | null | null |
 | `now ≥ game_datetime` | `awaiting_result` | null | null |
@@ -775,11 +782,13 @@ On v3 picks, `type` is `"match"` or `"player"`; the legacy type is in **`bet_typ
 | NBA canonical game | `market` `h2h`/`spread`/`total`, `selection` `t1`/`t2`/`over`/`under`, `line` | moneyline / spread / total | `t1` ⇒ home, `t2` ⇒ away; over/under | `line` (already signed) |
 | NBA canonical player | `market` `prop`, `selection` over/under, `line`, `stat` | player_prop | over/under | `line` |
 | NBA canonical milestone | `bet_type` `player_milestone`, `threshold_k`, `line: null` | player_prop | over | `threshold_k − 0.5` (contract §7.2) |
-| Format A moneyline | `bet_type` `H2H`; slot from `bookmaker.bet_line` prefix `T1_`/`T2_` (`resolveBookmakerBetLine`) | moneyline | `T1_` ⇒ home, `T2_` ⇒ away | null |
-| Format A total | `bet_type` `higher_TP` / `lower_TP`; `bookmaker.position` | total | over / under | numeric `position` |
-| Format A spread | `bet_type` `FAV_SPR<`, `FAV_SPR>`, `UD_SPR<`, `UD_SPR>`, `spread_fav`, `spread_dog`; slot from `bet_line` prefix; `position` is an unsigned magnitude | spread | from the slot | favourite ⇒ −magnitude, underdog ⇒ +magnitude (confirm the `<`/`>` meaning, §12.3) |
+| Format A moneyline | `bet_type` `H2H`; `bookmaker.bet_line` `T1_h2h`/`T2_h2h` when set, else the `code` prefix (`T2_null_2.15` ⇒ `T2`; real seed `37_H2H` has `bet_line: null`) | moneyline | `T1` ⇒ home, `T2` ⇒ away | null |
+| Format A total | `bet_type` `higher_TP` / `lower_TP`; line from `code` (`Over_222.5_1.9` ⇒ 222.5), else `bookmaker.position` | total | `higher_TP` ⇒ over, `lower_TP` ⇒ under | number |
+| Format A spread | `bet_type` `FAV_SPR<`, `FAV_SPR>`, `UD_SPR<`, `UD_SPR>`, `spread_fav`, `spread_dog`; side **and** line from `code` (`T1_-6.5_1.91` ⇒ `T1`, −6.5); only when `code` is missing, the `bet_line` prefix and `bookmaker.position` | spread | `T1` ⇒ home, `T2` ⇒ away | the `code` line as written; an unsigned value is positive (`T1_9.5_1.95` ⇒ +9.5) |
 | Format A draw, BTTS | `bet_type` `DRAW`, `BTTS_YES`, `BTTS_NO` | draw / btts | draw / yes / no | null |
 | Format A player | `bet_type` `player_over`/`player_under`/`player_yes`/`player_no`, `stat`, `position` | player_prop | over/under/yes/no | numeric `position`; null for yes/no |
+
+**Why `code` first:** the card's `pickDescription` for Format A game picks is built from `code` (`generateBetTypeDescription`, `top-pick.ts:165-260`: team from the `T1`/`T2` prefix, line as written with `+` added when unsigned), so the block must agree with what the card already says. The data is not self-consistent: seed `2002_FAV_SPR_us` has a signed `position` `"-6.5"`, and the real export `31679_FAV_SPR<` has `code` `T1_9.5_1.95` but `bet_line` `T2_spread_under`. Never derive a sign from the `FAV`/`UD` token. `resolveBookmakerBetLine` returns only `bet_line` (no fallback), so implement the `code` fallback in `legacy-selection.ts`. Format A `player_yes`/`player_no` (e.g. NFL anytime touchdown) map to yes/no with no line, per the producer contract (§7.3), even though the seed's `position` is 0.5; the BFF's own description omits the line for these (`top-pick.ts:485`).
 
 Anything else is unmappable: legacy block only, `selection` stays null and `entry.line` null. Per-league tokens: `src/lib/helpers.ts` (`BET_TYPES`), `docs/NFL/pick-mapping.md`, `docs/EPL/schema-diff-*.md`.
 
