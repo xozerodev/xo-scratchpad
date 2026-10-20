@@ -201,7 +201,7 @@ Also on every locked pick: `entry.source` and `current.source` are null. Leak ru
 
 - Status and result: settled ⇒ won, lost or push; void ⇒ void; otherwise null. `status_reason` only on cancelled or void.
 - Era: legacy ⇒ `picked_at`, `current`, `edge_holds_above` null, `edge_state` unknown, status never cancelled, reason only `game_void`; `selection` set when the legacy pick maps (Appendix A.5), else null. v4 ⇒ `picked_at` and (unless hidden) `selection` set.
-- Groups: each hidden group's fields null; each visible group's values set, except legacy `selection`, `entry.line` and `entry.source`, which may be null (unmappable pick, no line, no named bookmaker). `access.locked` false ⇒ `hidden` empty. Unlike the snapshot contract, the block schema has **no** "completed picks are never locked" rule: a settled or void pick may be locked when the legacy lock says so (the legacy bypass goes by game status, so a pick graded before its game ends, or a postponed game's pick, can stay locked; R3). Don't reuse `pickRuleViolations` from `v4.schema.ts` for blocks.
+- Groups: each hidden group's fields null; each visible group's values set, except legacy `selection`, `entry.line`, `entry.source` and `entry.stake_units`, which may be null (unmappable pick, no line, no named bookmaker, no stake in the document). `access.locked` false ⇒ `hidden` empty. Unlike the snapshot contract, the block schema has **no** "completed picks are never locked" rule: a settled or void pick may be locked when the legacy lock says so (the legacy bypass goes by game status, so a pick graded before its game ends, or a postponed game's pick, can stay locked; R3). Don't reuse `pickRuleViolations` from `v4.schema.ts` for blocks.
 - Line rule (v4 era, selection visible): moneyline, draw, btts and yes/no props have no line; spread needs a line; over/under needs a positive line.
 - Observation: no `current` ⇒ `edge_state` unknown; `suspended` ⇒ `current` with odds, line and edge null.
 
@@ -880,3 +880,50 @@ Anything else is unmappable: legacy block only, `selection` stays null and `entr
 - BFF: `src/functions/matches-top-predictions-v3.ts`, `src/lib/match/common.ts`, `src/freemium/apply/top-picks.ts`, `src/freemium/apply/completed-bypass.ts`, `src/freemium/resolve/locked-pick-response.ts`, `src/freemium/registry/strip-helpers.ts`, `src/freemium/cache/*`, `src/lib/middleware/entitlement-middleware.ts`, `src/lib/my-pick/*`, `src/functions/my-picks-*.ts`, `src/lib/helpers.ts`, `src/lib/edge-picks/*`, `src/contracts/edge-picks/*`, `docs/nba-2026-bff-handover.md` §6.
 - App: `app/screens/TopPicksScreen/*` (XTP-125), `app/screens/GameScreen/_components/GamePick.tsx`, `app/context/PickSelectionContext.tsx`, `app/components/MyPicks/MyPicksItem.tsx`, `app/screens/MyPicksScreen/components/*`, `app/services/myPicks/myPicks.service.ts`, `app/hooks/useAppConfig.ts`.
 - Data: `reqs/nba/tools/` (dev NBA data and generators), `mobile-server/script/db-seeds/`.
+
+---
+
+## 14. Implementation status (mobile-server, branch `feat/edge-picks-v7`)
+
+P1 and P2 are implemented and tested; nothing is committed or deployed. P4 is not built (below). Where the code differs from this plan, the code is right and this section says why.
+
+### 14.1 Done
+
+| Phase | What | Where |
+| --- | --- | --- |
+| P1 | v7 gate, `edge_pick` block, `edge_pick_meta`, legacy and mock sources, redaction, settings, kill switch, mock generator, samples, JSON Schema | `src/lib/edge-picks/v7/`, `src/contracts/edge-picks/`, `src/functions/matches-top-predictions-v3.ts`, `docs/edge-picks-v7/` |
+| P2 | MP-1 to MP-8, the backfill and re-subscribe jobs | `src/lib/my-pick/` (`capture-snapshot.ts`, `leg.ts`, `backfill.ts`, `snapshot.ts`, `resolve-my-picks-list.ts`, `my-pick.ts`), `src/freemium/apply/my-picks.ts`, `src/functions/my-picks-*.ts`, `src/lib/follow-topic.ts`, `script/my-picks/backfill-snapshots.ts`, `script/follows/resubscribe.ts` |
+| Tests | Every catalogue row for P1 and P2 (V-UNIT, V-MOCK, V-INV, V-SEC, V-CACHE, V-ERR, V-REG, V-RT) | `src/functions/__tests__/matches-top-predictions-v7.test.ts`, `my-picks-slip-safety.test.ts`, `matches-v7-regression.test.ts`, `src/lib/edge-picks/v7/__tests__/`, `src/lib/my-pick/__tests__/`, `src/contracts/edge-picks/__tests__/` |
+
+The full suite passes (149 suites, 1,739 tests). The two security tests were checked by mutation: with the entitlement check on capture removed, five tests fail; with owner visibility removed, two fail.
+
+### 14.2 Not done
+
+- **P4:** the Cosmos record source (`EDGE_PICK_SOURCE=cosmos` logs "not built yet" and behaves as `none`), cancelled-pick injection (BE-11), BE-9 and BE-10, the L2 seeded records container, per-league live. They depend on the data engineering deliverables (KDD-001 container). MP-5 (f) waits for BE-10.
+- **MP-3 and MP-7 jobs have not been run** in dev or tst (no environment access from this session). Both default to a dry run.
+- **Docs:** `kdd23-design.md` and KDD-003 still describe option A.
+
+### 14.3 Deviations from the plan
+
+| Area | Plan | Implemented | Why |
+| --- | --- | --- | --- |
+| Legacy `entry.stake_units` | A number | Null when the legacy pick has no stake | Real legacy picks often have none (see §4.3) |
+| Mock guard | "Production forces `none`" | Fail-closed: the mock needs positive evidence of a non-production environment (`NODE_ENV=test`, `EDGE_PICK_ENVIRONMENT` of dev, local, test, tst or stg, or such a marker in the database or Firebase project name); `prod` vetoes it | A missing setting must not turn the mock on in production |
+| Cache bypass | Not specified | `withFreemiumResponseCache` takes `bypassCache`; an honoured mock-parameter request sets it | V-SEC-2: such a request is neither served from nor written to the cache |
+| Mock scenarios | Nine required, then weighted | Plus an `unfinished` scenario for `edge-picks-v4` | The universal leak sweep requires every entitlement-gated endpoint to have a case |
+| `settled_push` | Pushes at the picks' own lines | The mock rounds a completed pick's line to a whole number | Every dev line is x.5, so no push could occur |
+| Mock time | Exact clock | Observation time is quantised to a 5-minute bucket | Determinism (V-MOCK-1) |
+| MP-1 failure modes | v2 stores without snapshots on a failed peer load | Same. `POST /v3/my-picks` keeps its retry-then-throw and its 400 `freemium_pick_unavailable` | No new failure mode for any build |
+| MP-2 unavailable row | Odds null, totals null | Also `bookmaker.bet_odds.decimal_odds: 1` and `probability: 1` | V-RT-5 (store build 1.1.66 reads them). Consequence: 1.1.66 shows the product of the other legs for a slip with an unavailable leg (it showed 0), main shows "—" |
+| MP-3 region | Not specified | The job uses the stored user region (default `us`) | A user with no stored region and an AU token gets no backfill for AU picks (unresolved, counted), never wrong data |
+| MP-4 | Owner sees the saved item | The item is shown as a live row with the snapshot's wager fields overlaid when its pick is still listed but locked | Known limitation: that owner also sees the pick's other live fields (such as other bookmakers' prices). A fix needs the snapshot row built beside the live one; left for the team to decide. `snapshot_captured_for` is exposed on the row (additive) |
+| MP-5 (b) | `cancelled` from the producer record only | A leg on a cancelled, canceled or abandoned game is `void` | Appendix A.4 does the same for the block |
+| MP-5 (d) | Void, push, cancelled at 1.0 | Also: a leg with no price makes the totals null | Honest unknown instead of 0. The legacy `v1` and `v2` My Picks branches share the builder, so a placeholder there now gives null totals as well |
+| MP-8 | Signature change taking the auth user | `options.tokenRegion` (stored region, then token, then `us`) | Same order as `resolveUserRegion`, no second Cosmos read, and the existing callers' first argument is unchanged |
+| MP-7 | `queue-fcm-device.ts` only | One `followTopic()` used by follow, unfollow and the device queue | The three must build the same name |
+
+### 14.4 Found while implementing (existing behaviour, unchanged)
+
+- **My Picks ranks unlock winners per game; the list ranks per day.** A free user can see an unlocked pick on the list that My Picks treats as unavailable (in the fixtures, one of the day's six unlocked NBA picks), so `POST /v3/my-picks` answers 400 `freemium_pick_unavailable` for it and `POST /my-picks-v2` stores it without a snapshot. The behaviour predates this work. It matters for FE-7: a free user can add such a pick to the slip but not keep it.
+- **Tests that leave rows behind:** `my-picks-create`, `-delete`, `-delete-v2`, `-delete-all` and `-update-v2` fail on a second run against the same emulator, because they write fixed ids. `npm test` resets the database before and after; running jest directly needs `ts-node script/seed-test-cleanup.ts` and `script/seed-test.ts` first.
+- Two lint errors remain in lines this work did not change (`target-follow.ts:65`, `target-unfollow.ts:55`, unused expressions).
