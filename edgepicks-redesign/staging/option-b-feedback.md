@@ -1,355 +1,387 @@
-# Critical Review & Technical Assessment of `option-b-plan.md`
+# Critical Review & Assessment (Round 2): `option-b-plan.md`
 
-**Reviewed Document:** [option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md) (862 lines)  
-**Sibling Specifications Cross-Checked:**
-- [delivery-options.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/delivery-options.md)
-- [conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md) (Producer Pick Record `4.0.0`)
-- [kdds.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/kdds.md) (KDD-001, KDD-002, KDD-003)
-- [coexistence-approach.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/coexistence-approach.md) (Prerequisites P1–P9, Invariants I1–I8)
-
-**Codebases & Datasets Verified:**
-- **BFF (`mobile-server`):** `/mnt/devel/xosports/github/mobile-server` on `feat/edge-picks` at `35f6f44`
-- **App (`mobile-app`):** `/mnt/devel/xosports/github/mobile-app` on `main` at `137f2f61`, `origin/feat/XTP-125-Edge-Picks-Redesign-Oct26` at `88de3461`, and store tag `main/1.1.66`
-- **Datasets:** [nba_mock_data_2weeks.json](file:///mnt/devel/xosports/reqs/nba/tools/nba_mock_data_2weeks.json) (673 docs, 107 games, 1,070 picks) and `/mnt/devel/xosports/github/mobile-server/script/db-seeds/*.json`
-
----
-
-## 1. Executive Summary & Overall Verdict
-
-[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md) is a strong, deeply researched implementation plan. Unlike abstract architecture documents, it is grounded in actual line-level inspection of `mobile-server` (`35f6f44`), `mobile-app` (`137f2f61`, `88de3461`, and `main/1.1.66`), Terraform app settings, and Cosmos seed files. Its core architectural choices—attaching an additive `edge_pick` block on `GET /v3/matches/:date/top-predictions`, keeping `locks` untouched (`V-INV-1`), decoupling the remote-config `API_VERSION` from `v6` (`VG-1`/`VG-2`), fixing the `1.1.66` My Picks `NaN` odds/returns (`MP-1`–`MP-5`), and fixing the FCM pipe-in-topic mismatch (`MP-6`)—are sound and well-justified.
-
-However, our verification against the live code, the Producer Pick Record `4.0.0` contract ([conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md)), and the actual mock/seed JSON datasets uncovered **12 technical defects and omissions** that will cause security regressions, test failures, or broken UI states if not resolved before implementation:
-
-| ID | Severity | Area | Summary |
-|---|---|---|---|
-| **F-01** | **CRITICAL** | Security / Freemium (`§6 MP-1`, `MP-4`, `§3 D3`) | Combining unconditional snapshot capture on `POST /my-picks-v2` (`MP-1`) with showing any snapshot-backed or locked-peer item to its owner on `GET /my-picks-v2?api_version=v3` (`MP-4`) creates a **complete freemium bypass oracle**: any free user can unlock every locked pick on the platform by posting its unredacted `pick.id` to `POST /my-picks-v2`. |
-| **F-02** | **HIGH** | Generator & Schema (`§4.4 R6`, `§8.3`, `§10.1 V-UNIT-5`) | In [nba_mock_data_2weeks.json](file:///mnt/devel/xosports/reqs/nba/tools/nba_mock_data_2weeks.json), **760 of 1,070 picks (71%)** have `bookmaker.bet_odds.american_odds` that do **not** match `decimalToAmerican(decimal_odds)` (e.g., `1.85` paired with `-111` instead of `-118`), and `script/db-seeds/*.json` has 16-decimal-place floats, `bookmaker.name: null`, and `bet_stake: 0`. Copying prices/probabilities "as written" (`R6`, `§8.3` step 3) while enforcing §9.1 invariants (`§8.3` step 11, `V-UNIT-5`) will throw on 71% of NBA mock picks and all MLB seed player picks. |
-| **F-03** | **HIGH** | Generator (`§8.3` steps 7–8, `§8.4`) | Step 7 restricts scenario assignment to *"status `open` and the game not started"*, leaving started/completed games (including all 7 games on golden day `2026-10-22`) with **no scenario assigned** for Step 8; worse, if a started game has `observed_at: null`, Step 8's rule *"For started games the observation has `is_closing: true`"* directly violates §9.1 Invariant #4 (`observed_at === null` $\implies$ `is_closing === false`). |
-| **F-04** | **HIGH** | Legacy Selection Mapping (`§5.2`, `Appendix A.5`) | Three concrete mismatches against `script/db-seeds/*.json`: (a) `2002_FAV_SPR_us` in [data-c-nfl-wltp-dev.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nfl-wltp-dev.json) has an already-signed negative `position: "-6.5"` (not an unsigned magnitude), and `31679_FAV_SPR<` in [data-c-nba-wltp-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-wltp-dev-v2.json) has `code: "T1_9.5_1.95"` vs. `bet_line: "T2_spread_under"`; (b) `2002_player_TD_au`/`us` in [data-c-nfl-ps-dev.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nfl-ps-dev.json) has `type: "player_yes"`, which `Appendix A.5` does not handle (`edge_pick: null`); (c) `37_H2H` has `bet_line: null` and requires `pick.code` fallback. |
-| **F-05** | **HIGH** | Freemium / Cancelled Injection (`§5.3`, `Appendix A.3`) | `injectCancelledPicks` sets `locked: true` on pre-game cancelled picks for free users and `attachEdgePicks` redacts `edge_pick`, **but `Appendix A.3` never calls `nullifyLockedPickFields` on the injected item's top-level fields**, leaking unredacted `pickDescription`, `probability`, `bookmaker.bet_odds`, and `market_odds` over the wire (`SEC-R-002`). |
-| **F-06** | **HIGH** | App Integration (`§7.1 FE-3`, `FE-6`, `§2.2`, `§10.1 V-FE-1`) | Three missing edits in [EdgePicksCard.tsx](file:///mnt/devel/xosports/github/mobile-app/app/screens/TopPicksScreen/_components/EdgePicksCard.tsx) on `XTP-125`: (a) `bookmakerOddsPick` (lines 92–100) is constructed with an explicit property whitelist that omits `edge_pick: pick.edge_pick`, so `FE-3` in `bookmakerOdds.ts` never receives `pick.edge_pick`; (b) `CardOutcomeFooterRow` (line 281) hardcodes `outcome={null}` (noted in `§2.2` line 108 and tested in `V-FE-1`, but omitted from `§7.1`); (c) `FE-6` leaves Add-to-Slip enabled on `Postponed` games (`edge_pick.status === "open"` per `D7`) and on completed/cancelled fallback cards where `edge_pick` is `null`. |
-| **F-07** | **HIGH** | My Picks Settlement & UI (`§6 MP-5`, `§2.2`, `§7.1`) | (a) `MP-5(c)` targets `my-picks-v2.ts:177–218`, but `GET /my-picks-v2?api_version=v3` actually computes slip `status`, `totalOdds`, and `returnAmount` in [`buildMyPickSlipResponse`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L162-L213); (b) [`buildMyPickSlipResponse`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L196) requires `item.status === "Completed"` for every leg, so slips with a pre-game cancelled leg or a `"Cancelled"` game never settle (`status: false` forever); (c) [MyPicksItem.tsx](file:///mnt/devel/xosports/github/mobile-app/app/components/MyPicks/MyPicksItem.tsx#L101) (`pick.outcome ? "tick" : "close_red"`) and [PickGroupCard.tsx](file:///mnt/devel/xosports/github/mobile-app/app/screens/MyPicksScreen/components/PickGroupCard.tsx#L57) treat `outcome === 2` (truthy!) as a **Won** pick with a green checkmark because no `FE-*` item updates them. |
-| **F-08** | **MEDIUM** | Lifecycle & Schema (`§4.3`, `§5.5`, `Appendix A.4`) | `Appendix A.4` maps `pickOutcome` `0`/`1`/`2` to `settled`/`void` before checking whether the game is completed, while [`isMatchCompleted`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/completed-bypass.ts#L52-L63) only checks game status. Any pick graded before game completion (e.g., mid-game or `100077296` in `data-c-nba-ps-dev-v2.json`) gets `edge_pick.status: "settled"` with `access.locked: true`, violating `EdgePickBlockSchema` (`settled` and `void` picks are never locked). |
-| **F-09** | **MEDIUM** | Lifecycle & My Picks (`§6 MP-5(b)`, `Appendix A.4`) | Both `Appendix A.4` (line 761) and `MP-5(b)` (line 385) restrict `outcome = "push"` on `pickOutcome === 2` to *"spread or total on a whole-number line"*, contradicting [conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md#L98-L100) §4.2 which explicitly includes whole-number `player_prop` lines. |
-| **F-10** | **MEDIUM** | App Title & Badge (`§7.1 FE-2`, `FE-4`) | (a) In `edgePickTitle.ts` (`XTP-125`), `selectionTeam` does not handle `selection: "draw" | "yes" | "no"` (or canonical `"t1"`/`"t2"`), rendering lowercase `"no"` or `"draw"` as the card title for EPL `btts` / 3-way moneyline draw picks; (b) `EdgeValueBadge.tsx` uses `Math.abs(value) <= 1 ? value * 100 : value` (which misformats any EV edge $> 1.0$, i.e. $> 100\%$) and uses the same orange downward-arrow styling for `closed` as for `narrowing`. |
-| **F-11** | **MEDIUM** | Legacy Route & Cache (`§5.4`, `§9.1`, `Appendix A.3`) | (a) `§5.4` (line 280) says to wire the block builder into the legacy `GET /matches/:date/top-predictions` route (`matches-top-predictions.ts:171`), which does not run `attachEdgePicks` or `injectCancelledPicks`; (b) `Appendix A.3` sets `type: record.market === "player_prop" ? "player" : "match"` on injected cancelled picks, whereas [`filterTopPredictionsByType.ts`](file:///mnt/devel/xosports/github/mobile-app/app/screens/TopPicksScreen/filterTopPredictionsByType.ts#L8-L13) in `mobile-app` checks `prediction_type` **before** `type` (`pick.prediction_type ?? pick.type`) — if `prediction_type` is omitted on injected rows, `TopPickCard` / `EdgePicksCard` follow/analytics (`String(props.prediction_type ?? "match")`) misclassifies every injected cancelled player prop as `"match"`! |
-| **F-12** | **LOW** | Citations & Line Numbers (`§2.1`, `§2.2`, `§3`, `§6`) | Minor file/line citation drift in four places (`target-follow.ts:62` $\to$ `63`; `EdgePicksCard.tsx:218–224` $\to$ `278–286`; `src/lib/match/parsers/sections.ts` $\to$ `src/lib/match/parsers/sections/index.ts`; `my-picks-v2.ts:195` $\to$ `src/lib/my-pick/my-pick.ts:196`). |
+**Reviewed Document:** [option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md) (Round 2 revision, 871 lines)
+**Cross-Referenced Against:**
+- Sibling contract & design documents in `staging/`:
+  - [conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md) (updated to 37-field schema)
+  - [producers-to-bff.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/producers-to-bff.md)
+  - [bff-to-app-contract.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/bff-to-app-contract.md)
+  - [kdds.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/kdds.md)
+  - [delivery-options.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/delivery-options.md)
+- **`mobile-server`** repository (`/mnt/devel/xosports/github/mobile-server`, branch `feat/edge-picks` at `35f6f44` and `main` at `9b1f710`)
+- **`mobile-app`** repository (`/mnt/devel/xosports/github/mobile-app`, branch `main` at `137f2f61`, `origin/feat/XTP-125-Edge-Picks-Redesign-Oct26` at `88de3461`, and store tag `main/1.1.66` at `581d6c5d`)
+- **Upstream NBA mock dataset & seed files:**
+  - [nba_mock_data_2weeks.json](file:///mnt/devel/xosports/reqs/nba/tools/nba_mock_data_2weeks.json) (107 games, 1,070 canonical picks across `au`/`us`)
+  - `/mnt/devel/xosports/github/mobile-server/script/db-seeds/*.json` (107 seed documents across Format A, Format B, and Format C)
 
 ---
 
-## 2. Verification of Code Citations & Baseline Claims (§2.1, §2.2, §8.2)
+## 1. Executive Assessment
 
-We verified every code citation and factual claim in [option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md) against `mobile-server` (`35f6f44`), `mobile-app` (`137f2f61`, `88de3461`, `main/1.1.66`), and the data files.
+The Round 2 revision of [option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md) is a major step forward. **All 12 Round 1 findings (`F-01` through `F-12`) were directly addressed** in the plan and in [conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md):
+- The My Picks freemium & snapshot security model (`MP-1`..`MP-4`, `FE-6`, `FE-7`) is now architecturally sound (`captured_for: "subscriber" | "free_unlocked" | "backfill"`, `releaseStagedContentMiddleware` + `entitlementMiddleware` on `POST /my-picks-v2`, stripping `snapshot` from the 200 response).
+- The `api_version` gate has been bumped from `v6` to `v7` (`TOP_PREDICTIONS_V3_EDGE_PICK_BLOCK_MIN_MAJOR = 7`), eliminating the collision with `mobile-app` `main` (`API_VERSION = "v6"`).
+- `EdgePickBlockSchema` now adopts the group-based `access.hidden` redaction contract from [v4.schema.ts](file:///mnt/devel/xosports/github/mobile-server/src/contracts/edge-picks/v4.schema.ts#L455-L539), and the mock generator (`§8.3`) now includes `round4` normalization, closing observation flags (`is_closing`), and boundary-safe `deriveEdgeState` math (verified: **0** `m - b < 0.0002` collisions across all 1,070 NBA picks).
 
-### 2.1 Verified & Accurate Claims
-- **Version Gate & Cache Keys (`§2.1` lines 53–59):**
-  - [`releaseStagedContentMiddleware`](file:///mnt/devel/xosports/github/mobile-server/src/lib/middleware/api-version-middleware.ts#L50-L58) runs [`withStagedContentAllowed(isStagedContentReleased(request), handler)`](file:///mnt/devel/xosports/github/mobile-server/src/lib/middleware/api-version-middleware.ts#L55).
-  - [`RELEASE_API_VERSION_MAJOR = 6`](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/canonical/gate.ts#L78) and [`parseApiVersionMajor`](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/canonical/gate.ts#L91-L97) gate `STAGED_LEAGUES` (`nba:2026` in [infra/envs/dev/app_settings.tf](file:///mnt/devel/xosports/github/mobile-server/infra/envs/dev/app_settings.tf#L71)).
-  - [`buildFreemiumCacheKey`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/cache/response-cache-keys.ts#L16-L43) includes `apiVersion`, and [`withFreemiumResponseCache`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/cache/response-cache.ts#L48-L117) caches pre-freemium responses before [`applyIfFreemium`](file:///mnt/devel/xosports/github/mobile-server/src/functions/matches-top-predictions-v3.ts#L303-L309) clones and mutates them per caller.
-  - [`MAX_FREEMIUM_RESPONSE_CACHE_BYTES = 512 * 1024`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/cache/ttl-cache.ts#L10) is enforced in [`TtlCache.set`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/cache/ttl-cache.ts#L120-L129).
-- **Freemium Lock & Strip Behavior (`§2.1` lines 60–65):**
-  - [`applyFreemiumToTopPicksResponse`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/top-picks.ts#L116-L162) sets `pick.locked = false` on completed games ([`isMatchCompleted`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/completed-bypass.ts#L52-L63)) and on the top $K$ unlocked picks per enabled sport ([`selectTopKUnlockedIds`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/pick-freemium-helpers.ts#L98-L113)), and `pick.locked = true` on all remaining active picks.
-  - [`nullifyLockedPickFields`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/resolve/locked-pick-response.ts#L206-L246) strips [`TOP_PICK_STRIP_PATHS`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/registry/strip-helpers.ts#L169-L196) and nulls [`LOCKED_PICK_IDENTITY_KEYS`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/resolve/locked-pick-response.ts#L67-L84), while preserving `id`.
-- **1.1.66 Store Build vs. `main` App Behavior (`§2.2` lines 101–115):**
-  - On `main/1.1.66`, `PickGroupCard.tsx` (lines 60–72, 156) computes `const odds = pick.bookmaker?.bet_odds?.decimal_odds` without `resolveBookmaker`. Because canonical NBA picks set `bookmaker: [bm]` (an array, in [`canonical/picks.ts`](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/canonical/picks.ts#L524)) and [`hydratePickFromSnapshot`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/snapshot.ts#L332-L373) omits `bookmaker` altogether, `odds` is `undefined` and `acc.totalOdds * odds` evaluates to `NaN` (`$NaN` in the summary row on `1.1.66`).
-  - On `main` (`137f2f61`), [`AppConfigContext.tsx`](file:///mnt/devel/xosports/github/mobile-app/app/context/AppConfigContext.tsx#L48) sets `const apiVersion = DEFAULT_API_VERSION` where [`DEFAULT_API_VERSION = "v6"`](file:///mnt/devel/xosports/github/mobile-app/app/hooks/useAppConfig.ts#L42), whereas `main/1.1.66` calls `resolveApiVersion(appConfig)` and reads `api_version` from `GET /config` (`API_VERSION = "v5"` in [infra/envs/dev/app_settings.tf](file:///mnt/devel/xosports/github/mobile-server/infra/envs/dev/app_settings.tf#L28)).
+However, simulating the updated plan step-by-step against the actual `mobile-server` / `mobile-app` codebases and running the updated §8.3 generator logic against the real 107-game NBA dataset and the 107 `script/db-seeds/*.json` documents uncovered **8 remaining issues (`R2-01` through `R2-08` — 5 High, 2 Medium-High, 1 Medium)** that will cause runtime schema rejections, generator failures, or broken UI states if not tightened before implementation:
 
-### 2.2 Inaccurate Citations & Misidentified Code Locations
-1. **`src/functions/my-picks-v2.ts:177–218` (`status: true`, `my-picks-v2.ts:195`) in `§6 MP-5` (line 385):**
-   - **Plan claim (line 385):** *"On a settled slip (`status: true`, `my-picks-v2.ts:195`), set `returnAmount: 0` when any leg has `outcome === 0`"*
-   - **Actual code:** In [my-picks-v2.ts](file:///mnt/devel/xosports/github/mobile-server/src/functions/my-picks-v2.ts#L89-L111), `GET /my-picks-v2?api_version=v3` returns early at line 107 after calling [`resolveMyPicksListForUser`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/resolve-my-picks-list.ts#L71-L322), which calls [`buildMyPickSlipResponse`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L162-L213) at line 317. Line 196 of [`src/lib/my-pick/my-pick.ts`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L196) (not `my-picks-v2.ts`!) is where `const status = sortedActiveItems.every((item) => item.status === "Completed")` and `returnAmount: totalOdds * myPick.stake` (line 211) live for `v3`. (See **F-07** for the full impact.)
-2. **`EdgePicksCard.tsx:218–224` (`XTP-125`) in `§2.2` (line 108):**
-   - **Plan claim (line 108):** *"`EdgePicksCard.tsx:218–224` (`XTP-125`) | Footer `outcome` is hardcoded `null`; Add button checks only `status === GAME_STATUS.COMPLETED`"*
-   - **Actual code on `88de3461`:** `FooterComponent` and `CardOutcomeFooterRow` (`outcome={null}` and `status === GAME_STATUS.COMPLETED`) are at **lines 278–286** of `EdgePicksCard.tsx` on `origin/feat/XTP-125-Edge-Picks-Redesign-Oct26`.
-3. **`src/lib/match/parsers/sections.ts` in `§3 D5` (line 139):**
-   - **Plan claim (line 139):** *"Match Detail (`src/lib/match/parsers/sections.ts`) uses `GamePick.tsx`"*
-   - **Actual path:** [`src/lib/match/parsers/sections/index.ts`](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/parsers/sections/index.ts) (there is no `sections.ts` file).
-4. **`src/functions/target-follow.ts:62` in `§2.1` (line 81) and `§6 MP-6` (line 387):**
-   - **Actual line:** Line **63** of [`src/functions/target-follow.ts`](file:///mnt/devel/xosports/github/mobile-server/src/functions/target-follow.ts#L63) (`const topic = `${validPayload.targetType}-${validPayload.targetId?.replace(/\|/g, "_")}`;`).
+1. **`R2-01` (HIGH — `EdgePickBlockSchema` Completed-Unlock Invariant Collides with `completed-bypass.ts` on Postponed Games and Pre-Graded `Scheduled` Seed Picks):** `EdgePickBlockSchema` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L206), [v4.schema.ts](file:///mnt/devel/xosports/github/mobile-server/src/contracts/edge-picks/v4.schema.ts#L480-L495)) requires `access.locked === false` whenever `edge_pick.status` is `"settled"` or `"void"`. However, `shouldSkipFreemiumForGameStatus` ([completed-bypass.ts](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/completed-bypass.ts#L33)) intentionally keeps `"postponed"` games locked for free users (`pick.locked = true`), while `Appendix A.4` sets `edge_pick.status = "void"`. Furthermore, 5 seed picks in `script/db-seeds/` have `schedule.status = "Scheduled"` alongside `bet_outcome: "1.0"` or `"0"`, which `Appendix A.4` and `§8.3` step 6 grade as `status = "settled"` while `applyFreemiumToTopPredictionsBody` sets `pick.locked = true`. In both cases, `attachEdgePicks` produces `{ status: "void" | "settled", access: { locked: true } }`, failing `EdgePickBlockSchema` and causing `BE-6` to strip `edge_pick` and fail `V-INT-1` / `V-MOCK-3`.
+2. **`R2-02` (HIGH — `ProducerRecordSchema` Enforces the Strict Canonical v4 `pick_id` Regex in JSON Schema §9, Rejecting 336 NBA Picks and 100% of Format A/B Seed Picks, Plus Seed Data Quirks):** In [conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md#L460-L464), the strict canonical `pick_id` regex is embedded inside `properties.pick_id.pattern` of the §9 JSON Schema itself (not just §9.1 `recordInvariantViolations`). Because `§8.3` step 1 preserves `pick_id` as the v3 list emits it, `ProducerRecordSchema` rejects **336 of 1,070 NBA picks** (300 `player_milestone` picks and 36 `alternate` game picks) and **100% of Format A/B seed picks**. Additionally, 3 seed data quirks (null placeholder picks, a string `player_sk`, and duplicate/cross-region `pick_id`s) and the external path of `nba_mock_data_2weeks.json` need explicit handling in `§8.2`/`§8.3`.
+3. **`R2-03` (HIGH — `legacy-selection.ts` (`Appendix A.5`) Inspects `pick.type` and `pick.code`, Which Are Overwritten or Stripped on Derived v3 Picks in `matches-top-predictions-v3.ts`, and Misses `buildFeaturedH2hDetailPick`):** In `matches-top-predictions-v3.ts`, `buildBlock` receives **derived v3 picks** where `pick.type` is always `"match"` or `"player"` (the upstream type is moved to `pick.bet_type`), `pick.code` on Format B player picks is overwritten with the team abbreviation (e.g., `"CHC"`), `pick.code` on Format C picks is stripped, and `buildFeaturedH2hDetailPick` (`id: "h2h:<league>:<gameSk>:<teamSk>"`) has neither `bet_type` nor `code` nor `bet_line`.
+4. **`R2-04` (HIGH — Execution Order in `§5.1` Runs `NEW ②` `attachEdgePicks` Before `NEW ③` `injectCancelledPicks`, Leaving Injected Picks Unredacted, Unvalidated, and Uncounted in `body.count`):** Running `injectCancelledPicks` after `attachEdgePicks` bypasses `EdgePickBlockSchema` validation and group redaction on the injected picks' `edge_pick` blocks, and leaves `originBody.count` (computed before `applyIfFreemium`) out of sync with `body.top_picks.length`.
+5. **`R2-05` (HIGH — `era: "legacy"` Sets `edge_pick.selection = null`, Contradicting `§4.3` Line 204, `V-UNIT-3`, and `FE-6` Moneyline Exclusivity in P1):** Setting `selection = null` on all `era: "legacy"` blocks violates the group visibility rule in `§4.3` line 204, makes `V-UNIT-3` impossible to pass for legacy blocks, and breaks `FE-6` moneyline exclusivity in P1 (`EDGE_PICK_RECORD_SOURCE=none`) unless `legacy-selection.ts` populates `selection` (and `EdgePicksCard` forwards `bet_type` on `SelectedPick`).
+6. **`R2-06` (MEDIUM-HIGH — `§8.3` Step 7 Scenario Fallthrough Can Drop `line_moved` (`V-MOCK-2`), and Date Bucketing Needs an Explicit `schedule.game_date` Rule):** If the pick at index 3 of a day (`line_moved`, which requires `line !== null`) is a moneyline or yes/no pick (`line === null`), falling through to index 4's scenario (`suspended`) leaves zero picks with `line_moved` on that day, failing `V-MOCK-2`. Step 7 should swap index 3 with the next open pick that has `line !== null`.
+7. **`R2-07` (MEDIUM-HIGH — My Picks `MP-5(b)` & `FE-9` Reference Non-Existent Files in `mobile-app` and Miss Live-Resolved `pickOutcome`, Format A/B `line`, and `loadByGameSks` in `mobile-server`):** `FE-9` points to `app/services/myPicks/myPicks.adapter.ts` and `app/components/PredictionStatus.tsx`, neither of which exists in `mobile-app` (actual files: [MyPicksItem.tsx](file:///mnt/devel/xosports/github/mobile-app/app/components/MyPicks/MyPicksItem.tsx#L98-L105), [PickGroupCard.tsx](file:///mnt/devel/xosports/github/mobile-app/app/screens/MyPicksScreen/components/PickGroupCard.tsx#L56-L60), [type.ts](file:///mnt/devel/xosports/github/mobile-app/app/services/my-picks-v2/type.ts#L4-L22)). On the backend, live-resolved picks in `resolve-my-picks-list.ts` carry `pickOutcome` (not `outcome`), Format A/B snapshots have `line: null` unless populated via `legacy-selection.ts`, and `RecordSource` needs `loadByGameSks(gameSks, region)`.
+8. **`R2-08` (MEDIUM — `EdgePicksCard.tsx` (`88de3461`) Hardcodes `outcome={null}`, Hides `<BookmakerOddsChip>` on Locked Picks, and Gates `<ProbabilityBar>` to NBA Only):** Three concrete UI gaps on the existing `88de3461` branch should be explicitly called out in `FE-3` and `FE-4` so they are not missed during implementation.
 
 ---
 
-## 3. Detailed Technical Findings (Critical & High Severity)
+## 2. Round 1 Resolution Audit (`F-01` .. `F-12`)
 
-### F-01 [CRITICAL]: `MP-1` + `MP-4` Creates a Complete Freemium Bypass Oracle for All Locked Picks
-
-#### Plan Quotations
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L62) (§2.1, line 62):**
-  > "**Lock and null (`src/freemium/resolve/locked-pick-response.ts`).** `nullifyLockedPickFields` (line 206) walks `TOP_PICK_STRIP_PATHS` (`strip-helpers.ts:169–196`) and nulls `LOCKED_PICK_IDENTITY_KEYS` (`locked-pick-response.ts:67–84`, including `line`, `selection`, `threshold_k`, `player_full_name`, `team_full_name`). **`id` is in no strip list** (`strip-helpers.ts:28–75, 169–196`)."
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L135) (§3 Decision D3, line 135):**
-  > "| Is a pick that was saved while open and later cancelled or locked still returned in the user's My Picks? | **Yes, to its owner.** A saved slip item resolved from its create-time snapshot (`is_snapshot: true`) or from a now-locked peer is shown to the user who saved it. Only an item with neither a snapshot nor a peer stays fail-closed (`src/freemium/apply/my-picks.ts:86–94`). |"
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L381) (§6 `MP-1` & `MP-4`, lines 381, 384):**
-  > "| `MP-1` | `src/functions/my-picks-create-v2.ts:24–29` | Load peers with `loadMyPicksPeersByGameIds` (`resolve-my-picks-list.ts:392–451`) and write `snapshot: capturePickSnapshot(found)` (`snapshot.ts:120–159`) per item, matching `my-picks-create-v3.ts:64–118`. Peers load once per game; match by `id` or `bet_id`. If the peer load fails, store the item without a snapshot and log (no new validation, no new failure mode). |"
-  > "| `MP-4` | `src/freemium/apply/my-picks.ts:86–94` | Owner visibility (decision D3): a saved item resolved from its snapshot (`is_snapshot: true` on the resolved row, `snapshot.ts:372`) is shown to its owner, and so is a listed item whose peer is locked. Without a snapshot and without a peer, keep today's fail-closed rule |"
-
-#### Proof of Vulnerability
-1. On `GET /v3/matches/:date/top-predictions`, every locked pick (`locked: true`) still exposes its unredacted `id` (`pick_id`) and `game_sk` to free users.
-2. Unlike [`my-picks-create-v3.ts`](file:///mnt/devel/xosports/github/mobile-server/src/functions/my-picks-create-v3.ts#L92-L107) (which runs `entitlementMiddleware` and rejects locked picks for free users via `findUnavailableMyPickItemIds` with `403 PICK_LOCKED`), [`my-picks-create-v2.ts`](file:///mnt/devel/xosports/github/mobile-server/src/functions/my-picks-create-v2.ts#L16-L44) (`POST /my-picks-v2`) has **no entitlement middleware and no locked-pick check**.
-3. Under `MP-1` (*"no new validation, no new failure mode"*), when a free user sends `POST /my-picks-v2` with `{ stake: 10, items: [{ id: "1", predictionId: "<locked_pick_id>", gameId: "<game_sk>" }] }`:
-   - `POST /my-picks-v2` loads the **unredacted** peer pick via [`loadMyPicksPeersByGameIds`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/resolve-my-picks-list.ts#L327-L451), builds `snapshot: capturePickSnapshot(found)` containing the unredacted `description`, `line`, `odds_decimal`, `odds_american`, `probability`, `player_full_name`, and `team_full_name`, persists it to `c-mypicks-v2`, **and returns `my_pick` (including the unredacted `snapshot`) directly in the `201` response body** ([`my-picks-create-v2.ts:32-35`](file:///mnt/devel/xosports/github/mobile-server/src/functions/my-picks-create-v2.ts#L32-L35))!
-4. Then, under `MP-4`, when that free user calls `GET /my-picks-v2?api_version=v3`, [`isMyPickItemFreemiumAvailable`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/my-picks.ts#L69-L106) returns `true` because `MP-4` makes both `is_snapshot: true` items and *"a listed item whose peer is locked"* visible to a free-user owner!
-5. Consequently, any free user can unmask every locked pick across all sports simply by submitting its `id` and `game_sk` to `POST /my-picks-v2`.
-
-#### Required Fix
-1. **Gate `POST /my-picks-v2` (`MP-1`) with `entitlementMiddleware`:** In the mobile app ([EdgePicksCard.tsx:118](file:///mnt/devel/xosports/github/mobile-app/app/screens/TopPicksScreen/_components/EdgePicksCard.tsx#L118), [TopPickCard.tsx:188](file:///mnt/devel/xosports/github/mobile-app/app/screens/TopPicksScreen/_components/TopPickCard.tsx#L188)), adding picks to a slip is gated on `isActiveSubscription`. On the server, `POST /my-picks-v2` must run `entitlementMiddleware` and check `findUnavailableMyPickItemIds` for free users (or at minimum, refuse to capture a snapshot or allow saving when `!getEntitlementContext().isSubscriber` and the peer pick is locked), and strip raw `snapshot` from the `POST /my-picks-v2` response.
-2. **Tighten `MP-4` (`src/freemium/apply/my-picks.ts:86–94`):** A free user should only see a saved item whose live peer is now locked or absent if the item carries a server-captured `snapshot` (`item.snapshot != null`, which is only written after passing the create-time entitlement/unlock check). Never return an un-snapshotted item whose live peer is locked to a free user.
+| Round 1 ID | Summary of Round 1 Finding | Status in Updated Plan | Notes / Residual Items |
+| :--- | :--- | :--- | :--- |
+| **`F-01`** | My Picks freemium leak & snapshot/live race | **Resolved** | Fixed in `§3.5`, `§6` (`MP-1`..`MP-4`), `FE-6`, `FE-7`. Added `captured_for`, middleware on `POST /my-picks-v2`, stripped `snapshot` from 200 response, and gated `readAccessLocked`. |
+| **`F-02`** | `api_version=v6` collision with `mobile-app` `main` | **Resolved** | Fixed across `§3.1`, `§4.1`, `§7.1` (`FE-1`), `§9` (`V-INT-1`). Bumped gate to `api_version=v7` (`TOP_PREDICTIONS_V3_EDGE_PICK_BLOCK_MIN_MAJOR = 7`). |
+| **`F-03`** | `generate-mock-edge-picks.ts` violates `ProducerRecordSchema` on seed files | **Mostly Resolved** | Fixed float rounding (`round4`), null bookmaker (`odds_source_kind = "market_average"`), `stake_units >= 0`, and invariant flags (`checkIdFormula`, `checkEntryAmericanFormula`). **Residual:** `properties.pick_id.pattern` in §9 JSON Schema still rejects 336 NBA picks and all Format A/B picks — see **`R2-02`**. |
+| **`F-04`** | Closing observations never generated on started/completed games | **Resolved** | Fixed in `§8.3` step 8 via `rng(pickId, "c")` and `is_closing = gameStarted && observed_at !== null`. |
+| **`F-05`** | `deriveEdgeState` boundary collisions (`1e-4` and `round(1.03/d, 4)`) | **Resolved** | Fixed in `§8.3` step 4 (`p = min(0.95, round4(1.03 / d))`) and step 8 (`[b4 + 0.0001, m]` and `m + max(0.01, ...)`). Verified 0 boundary collisions across all 1,070 NBA picks. |
+| **`F-06`** | `legacy-selection.ts` spread side/sign in `code`, null `bet_line`, `player_yes` | **Mostly Resolved** | Fixed in `Appendix A.5` for raw seed fields, and `player_yes`/`player_no` added to `conf-schema-contracts.md` (`37` fields). **Residual:** `matches-top-predictions-v3.ts` mutates `pick.type` and `pick.code` on derived v3 picks before `buildBlock` runs — see **`R2-03`**. |
+| **`F-07`** | `EdgePickBlockSchema` locked invariants & injected cancelled picks | **Mostly Resolved** | Adopted `v4.schema.ts` group-based redaction (`access.hidden`) and `stripAsLockedTopPick` (`Appendix A.3`). **Residual:** `status: "void" \| "settled"` vs `locked: true` collision on postponed & pre-graded scheduled games (`R2-01`) and `NEW ②`/`NEW ③` ordering (`R2-04`). |
+| **`F-08`** | `EdgePicksCard.tsx` `bookmakerOddsPick` omits `edge_pick` | **Resolved** | Fixed in `§7.1` `FE-3` (line 403). |
+| **`F-09`** | Moneyline exclusivity on `EdgePicksCard` | **Mostly Resolved** | Fixed in `§7.1` `FE-6` (line 406). **Residual:** `era: "legacy"` sets `selection = null` and `EdgePicksCard` omits `bet_type` from `SelectedPick` — see **`R2-05`**. |
+| **`F-10`** | My Picks `MyPicksItem.tsx` & `PickGroupCard.tsx` reading live odds | **Resolved** | Fixed in `§7.1` `FE-7` (line 407) and `§6.4` `MP-5(a)`. |
+| **`F-11`** | `FE-9` settled `outcome` (`"push"`) vs `MyPickV2Item.outcome` (`0\|1\|2\|null`) | **Partially Resolved** | Addressed in `MP-5(b)` and `FE-9`, but `FE-9` cites non-existent files in `mobile-app` and `MP-5(b)` misses live-resolved `pickOutcome` — see **`R2-07`**. |
+| **`F-12`** | P2–P4 scope in `§5.2` / `§9` (`cosmos-source.ts`, `reconcile-snapshots.ts`) | **Resolved** | Added `cosmos-source.ts`, `inject-cancelled.ts`, `reconcile-snapshots.ts`, and `V-P4-1`/`V-P4-2`. |
 
 ---
 
-### F-02 [HIGH]: `R6` / `§8.3` ("Entry Price as Written") Directly Contradicts `§8.3` Step 11 / `V-UNIT-5` (§9.1 Invariants) on 71% of `nba_mock_data_2weeks.json` and on `script/db-seeds/*.json`
+## 3. Detailed Round 2 Findings & Required Fixes
 
-#### Plan Quotations
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L214) (§4.4 Rule `R6`, line 214):**
-  > "`R6` | Both come from the same price. In the generator (§8.3), `record.entry_decimal_odds` and `record.entry_american_odds` are copied from the derived document's bookmaker price, so the top-level fields and `edge_pick.entry` carry the exact same number."
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L450) (§8.3 steps 3 & 11, lines 450, 476):**
-  > "3. **Entry price.** `entry_decimal_odds` and `entry_american_odds` = the document's price as written (R6); `entry_captured_at` = game start minus 24 hours."
-  > "11. **Self-check.** Validate every record with `producer-record.schema.ts`. Mock records skip the id-formula invariant (`checkIdFormula: false`) because ids are reused as they are (Format A ids such as `2001_H2H_us`, NBA milestone ids); phantom records check it. A failure is a generator bug: throw in tests, report in dev."
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L533) (§10.1 `V-UNIT-5`, line 533):**
-  > "`V-UNIT-5` | `producer-record.schema.test.ts` | Producer schema and §9.1 invariants: the contract's five example records pass; one broken invariant each fails; `checkIdFormula: false` skips only the id check"
-- **[conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md#L642-L643) (§9.1 Invariants #2 & #3, lines 642–643):**
-  > "2. `probability`, `entry_decimal_odds`, `entry_edge`, `current_decimal_odds`, and `current_edge` are rounded to at most 4 decimal places."
-  > "3. `entry_edge`, `current_edge`, `edge_status`, `entry_american_odds`, and `current_american_odds` match the formulas in Section 5."
+### `R2-01` [HIGH] `EdgePickBlockSchema` Completed-Unlock Invariant Collides with `completed-bypass.ts` on Postponed Games and Pre-Graded `Scheduled` Seed Picks
 
-#### Empirical Verification Against the Actual Datasets
-We ran the §5 / §9.1 formulas across every pick in [nba_mock_data_2weeks.json](file:///mnt/devel/xosports/reqs/nba/tools/nba_mock_data_2weeks.json) and `/mnt/devel/xosports/github/mobile-server/script/db-seeds/*.json`:
+#### Where in `option-b-plan.md`
+- `§4.3` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L180-L186) & [L206](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L206))
+- `§8.3` step 6 ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L458))
+- `Appendix A.4` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L766-L780))
 
-1. **`nba_mock_data_2weeks.json` — 760 out of 1,070 picks (71.0%) violate `entry_american_odds === decimalToAmerican(entry_decimal_odds)`:**
-   - `40021717855|h2h_t1|t1|null|main|full|us`: `decimal_odds: 1.85`, `american_odds: -111` (contract §5.3 formula gives `-118`).
-   - `40021717855|400000000383|reb|player_under|8.5|main|full|au`: `decimal_odds: 1.95`, `american_odds: -118` (formula gives `-105`).
-   - `40021717855|400003547276|ast|player_milestone|6|main|full|au`: `decimal_odds: 2.1`, `american_odds: 115` (formula gives `110`).
-   - If `generator.ts` copies `entry_american_odds` "as written" per `R6` and `§8.3` step 3, **760 records fail `producer-record.schema.ts` in Step 11 (`throw in tests`)**.
-   - Conversely, if `generator.ts` recomputes `entry_american_odds = decimalToAmerican(entry_decimal_odds)` without updating the derived document, then for US users (`region = "US"`), `edge_pick.entry.odds_american` (`-118`) **disagrees** with the top-level `bookmaker.bet_odds.american_odds` (`-111`), violating `R6`.
-2. **`script/db-seeds/*.json` — Multiple §9.1 and §6.3 Violations When Copied "As Written":**
-   - **16–17 decimal places on `probability` and `decimal_odds` (violates §9.1 Invariant #2):**
-     - [data-c-wltp-dev-v4.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-wltp-dev-v4.json): `2_lower_TP_au`/`us` (`probability: 0.6222770468217342`), `7_lower_TP_au`/`us` (`0.5952879574416123`), `1122_higher_TP_au` (`0.6626083270082992`).
-     - [data-c-epl-wltp-dev.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-epl-wltp-dev.json): `500000123_BTTS_NO_au`/`us` (`probability: 0.43253035022173436`).
-     - [data-c-nba-ps-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-ps-dev-v2.json): all 7 MLB player picks have 16-digit `probability` (e.g., `0.6770568744981647`) and 16-digit `decimal_odds` (`1.7874015748031495`, `1.6666666666666667`).
-   - **`bookmaker.name: null` and `bet_stake: 0` in [data-c-nba-ps-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-ps-dev-v2.json):** All 7 MLB player picks have `bookmaker.name: null` (violating non-empty `bookmaker`), and `100076741|11013473|R|player_under|au` and `100076740|11001961|HR|player_under|au` have `bet_stake: 0` (violating `stake_units > 0` for non-withdrawn picks).
-   - **Null-placeholder object in [data-c-wltp-dev-v4.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-wltp-dev-v4.json) (`game_sk: 100076740`)** where `top_picks.au` and `top_picks.us` are `{ id: null, type: null, code: null, probability: null }`.
-   - **Duplicate pick ID and cross-region ID in [data-c-nba-ps-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-ps-dev-v2.json):** `100077282` contains two identical `100077282|11005503|R|player_under|au` entries in `team_1.picks`, and `100077296` uses `id: "100077296|11007152|HR|player_under|au"` inside both the `au` and `us` buckets (so indexing by `pick_id` alone without `region` overwrites `au` with `us`).
+#### Evidence & Failure Mechanism
+`EdgePickBlockSchema` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L206), matching [v4.schema.ts](file:///mnt/devel/xosports/github/mobile-server/src/contracts/edge-picks/v4.schema.ts#L480-L495)) enforces the completed-unlock invariant:
+> *"Completed unlock: `status` in `settled | void` or game final ⇒ `locked = false`, `hidden = []`."*
 
-#### Required Fix
-Update `§8.3` (steps 2–5, 11) and `R6` so that:
-1. `entry_decimal_odds = round4(d)` and `probability = round4(p)` are always rounded to 4 decimal places.
-2. Either (a) `producer-record.schema.ts` accepts `checkEntryAmericanFormula: false` alongside `checkIdFormula: false` for legacy/mock records so `entry_american_odds` can preserve the document's written American price (`R6`), **or** (b) `entry_american_odds = decimalToAmerican(entry_decimal_odds)` and `buildBlock` / seed normalization uses the same formula so `R6` and Invariant #3 both hold.
-3. Default missing `bookmaker.name` to `"SportsBet"` (`au`) / `"DraftKings"` (`us`), default `bet_stake <= 0` to `1.0`, skip picks with `id == null`, and key the in-memory record store by `${region}:${pick_id}` (with fallback to `pick_id`).
+Meanwhile, in `§4.3` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L180-L186)), `attachEdgePicks` sets `edge_pick.access.locked = true` whenever the v3 pick has `pick.locked === true` (which was set by `applyFreemiumToTopPredictionsBody` in [top-picks.ts](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/top-picks.ts#L103)).
 
----
+There are **two concrete collisions** between how `applyFreemiumToTopPredictionsBody` decides `pick.locked` and how `Appendix A.4` / `§8.3` step 6 decide `edge_pick.status`:
 
-### F-03 [HIGH]: `§8.3` Steps 7 & 8 Leave Started/Completed Games Without an Observation Scenario and Risk Violating §9.1 Invariant #4 (`observed_at: null` with `is_closing: true`)
+1. **Collision 1 — Postponed games (`status === "void"` vs `pick.locked === true`):**
+   - In [completed-bypass.ts](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/completed-bypass.ts#L28-L53):
+     ```ts
+     export const FREEMIUM_LOCKED_TERMINAL_STATUSES = [
+       "postponed",
+     ] as const satisfies readonly GameLifecycleStatus[];
+     ```
+     `shouldSkipFreemiumForGameStatus("Postponed")` returns **`false`** by design (see comment at [completed-bypass.ts](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/completed-bypass.ts#L28-L32): *"Postponed games are rescheduled and keep picks locked"*).
+   - Consequently, for a free user on a postponed game, non-winner picks have `pick.locked = true`.
+   - Meanwhile, `Appendix A.4` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L778)) maps `postponed | canceled | cancelled` to `edge_pick.status = "void"`.
+   - `attachEdgePicks` then produces `{ status: "void", result: "void", access: { locked: true, hidden: ["selection", "odds", "edge"] } }`, which **fails `EdgePickBlockSchema`** (`status === "void"` requires `locked === false, hidden = []`)! `BE-6` then logs `edge_pick.schema_violation` and strips `edge_pick` from the response.
 
-#### Plan Quotations
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L454-L473) (§8.3 steps 7 & 8, lines 454–473):**
-  > "7. **Scenario.** Eligible picks: status `open` and the game not started. On a day with $N \ge 6$ eligible picks per region, assign the first six (sorted by `pick_id`) to the six required scenarios so every state is represented at least once; assign the rest by `hash(pick_id) mod 100`: `live` 35, `narrowing` 20, `closed` 12, `moved` 13, `no_observation` 10, `cancelled` 10. On smaller days, assign in priority order: `live`, `narrowing`, `moved`, `cancelled`, `closed`, `no_observation`."
-  > "8. **Observation.** ... `observed_at` = min(now, start − 1 min) − rng × 30 min. For started games the observation has `is_closing: true`."
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L482) (§8.4 Golden Day `2026-10-22`, line 482):**
-  > "| `2026-10-22` | 7 completed | Settled won / lost / push, completed-game freemium bypass, My Picks settlement |"
+2. **Collision 2 — Pre-graded `Scheduled` games in `script/db-seeds/*.json` (`status === "settled"` vs `pick.locked === true`):**
+   - In the actual seed files under `/mnt/devel/xosports/github/mobile-server/script/db-seeds/`, 5 picks have `schedule.status = "Scheduled"` (`outcome.game_status = "Scheduled"`) **and** a non-null `bookmaker.bet_outcome` (`"1.0"` or `"0"`):
+     - [data-c-epl-wltp-dev.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-epl-wltp-dev.json): `500000123_BTTS_NO_au` and `500000123_BTTS_NO_us` (`schedule.status: "Scheduled"`, `bookmaker.bet_outcome: "1.0"`).
+     - [data-c-nba-ps-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-ps-dev-v2.json): `100077282|11005503|R|player_under|au` (`outcome.game_status: "Scheduled"`, `bet_outcome: "0"`), `100077287|11006868|HR|player_under|au` (`outcome.game_status: "Scheduled"`, `pick_status: "final"`, `bet_outcome: 0`), and `100077296|11007152|HR|player_under|au` (`outcome.game_status: "Scheduled"`, `pick_status: "scheduled"`, `bet_outcome: 0`).
+   - Because `schedule.status` is `"Scheduled"`, `shouldSkipFreemiumForGameStatus("Scheduled")` returns `false` and `applyFreemiumToTopPredictionsBody` sets `pick.locked = true` on non-winner picks.
+   - Meanwhile, `Appendix A.4` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L769-L770)) and `§8.3` step 6 ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L458)) inspect `bet_outcome` (`1` or `0`) *first* without checking whether the game is completed (`shouldSkipFreemiumForGameStatus(schedule?.status)`), so they set `edge_pick.status = "settled"`.
+   - When `attachEdgePicks` runs for a free user, it sets `edge_pick.access.locked = true` on a pick with `edge_pick.status = "settled"`, **violating `EdgePickBlockSchema`** and breaking `V-INT-1` and `V-MOCK-3`!
 
-#### Proof of Defect
-1. On `2026-10-20`, `2026-10-21`, `2026-10-22` (golden day), and `2026-10-23`, **100% of the games in [nba_mock_data_2weeks.json](file:///mnt/devel/xosports/reqs/nba/tools/nba_mock_data_2weeks.json) are completed (`status: "final"`) and 100% of their picks have `bet_outcome` `0` or `1` (`pick_status = "settled"` from Step 6)**.
-2. Because Step 7 defines eligible picks as *"status `open` and the game not started"*, **none** of the settled/void/awaiting_result picks are assigned a scenario in Step 7.
-3. Step 8 then defines observation fields (`current_line`, `current_decimal_odds`, `current_american_odds`, `current_edge`, `edge_status`, `observed_at`) strictly per Step 7 scenario table, and adds at line 473: *"For started games the observation has `is_closing: true`."*
-4. Two failures result:
-   - Settled/started picks have no scenario from Step 7 to determine which observation row in Step 8 applies.
-   - For any started/settled game assigned to `no_observation` (`observed_at: null`), setting `is_closing: true` violates [conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md#L644) §9.1 Invariant #4 (*"When `observed_at` is `null`: ... `is_closing` is `false`, and `edge_status` is `'unknown'`"*) and [`v4.schema.ts:242-255`](file:///mnt/devel/xosports/github/mobile-server/src/contracts/edge-picks/v4.schema.ts#L242-L255) (`CurrentBlockSchema` only exists when `observed_at` is non-null).
-
-#### Required Fix
-In `§8.3` Steps 7 & 8:
-- Keep Step 7's 6-scenario coverage rule (including `cancelled`) for `open` pre-game picks.
-- For non-`open` or already-started picks (`settled`, `void`, `awaiting_result`), assign one of the 5 non-cancelled observation scenarios (`live`, `narrowing`, `closed`, `moved`, `no_observation`) deterministically via `hash(pick_id) mod 90` (`live` 35, `narrowing` 20, `closed` 12, `moved` 13, `no_observation` 10).
-- In Step 8, set `is_closing: gameStarted && observed_at !== null` (never `true` when `observed_at === null`).
+#### Concrete Fix for `option-b-plan.md`
+1. **In `Appendix A.4` (lines 766–780) and `§8.3` step 6 (line 458):**
+   - Only map `outcomeCode` (`1`, `0`, `2`, `-1`) to `status = "settled" | "void"` when the game itself is in a completed/unlocked terminal status (`shouldSkipFreemiumForGameStatus(schedule?.status) === true`, i.e., `Final`, `F/OT`, `Completed`, `Full Time`, `Ended`, `AET`, `PEN`, `Canceled`, `Cancelled`, `Abandoned` — **not** `Scheduled` or `Postponed`), OR when a v4 producer record explicitly carries `settlement_status === "settled" | "void"` on a completed game.
+   - For `"postponed"` games (where `shouldSkipFreemiumForGameStatus` is `false` so picks stay locked for free users), map `edge_pick.status` to `"suspended"` (`availability_reason: "line_suspended"`, `result: null`) rather than `"void"`, **or** if `status = "void"` is desired on postponed games, add `"postponed"` to `FREEMIUM_UNLOCKED_TERMINAL_STATUSES` in [completed-bypass.ts](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/completed-bypass.ts#L23-L33). Keeping `"postponed"` locked (`status = "suspended"`) matches existing `completed-bypass.ts` behavior without changing freemium policy.
+2. **In `§4.3` (`attachEdgePicks`, lines 180–186):**
+   - Add a defensive guard: if `block.status === "settled" || block.status === "void"`, force `access: { locked: false, hidden: [] }` (or if `pick.locked === true` on a non-final game, coerce `block.status` to `"open"` / `"suspended"` with `result: null`) so `attachEdgePicks` can **never** emit `{ status: "settled" | "void", access: { locked: true } }`.
 
 ---
 
-### F-04 [HIGH]: Legacy Selection Mapping (`§5.2` & `Appendix A.5`) Fails on Real Format A Spreads, `player_yes` Props, and Null-`bet_line` H2H Picks in `script/db-seeds/`
+### `R2-02` [HIGH] `ProducerRecordSchema` Enforces the Strict Canonical v4 `pick_id` Regex in JSON Schema §9, Rejecting 336 NBA Picks and 100% of Format A/B Seed Picks, Plus Seed Data Quirks
 
-#### Plan Quotations
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L779-L781) (Appendix A.5, lines 779–781):**
-  > "| Format A H2H | `bet_type` `H2H`/`h2h`, `bet_line` `T1_h2h`/`T2_h2h`/`Draw` | `moneyline` | `home` / `away` / `draw` | `null` |"
-  > "| Format A spread | `bet_type` `FAV_SPR<`, `FAV_SPR>`, `UD_SPR<`, `UD_SPR>`, `spread_fav`, `spread_dog`; slot from `bet_line` prefix; `position` is an unsigned magnitude | `spread` | from the slot | favourite ⇒ `−magnitude`, underdog ⇒ `+magnitude` (confirm the `</>` meaning, §12.3) |"
-  > "| Format A player | `bet_type` `player_over`/`player_under`; `position` | `player_prop` | `over` or `under` | `Number(position)` |"
+#### Where in `option-b-plan.md`
+- `§5.2` `BE-1` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L243))
+- `§8.2` & `§8.3` step 1 ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L446-L454))
+- `§9` `V-MOCK-1` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L539))
+- Cross-ref: [conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md#L460-L464)
 
-#### Proof Against `script/db-seeds/*.json` and `src/lib/top-picks/top-pick.ts`
-1. **Format A Spread (`2002_FAV_SPR_us` and `31679_FAV_SPR<`):**
-   - In [data-c-nfl-wltp-dev.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nfl-wltp-dev.json) (`game_sk: 2002`, US), the pick is:
+#### Evidence & Failure Mechanism
+1. **Strict `pick_id` regex inside §9 JSON Schema (`ProducerRecordSchema`):**
+   - `§5.2` line 243 states:
+     > *"Validate `ProducerRecordSchema` (37 fields; `conf-schema-contracts.md` §6, §9)... `recordInvariantViolations(rec, { checkIdFormula?, checkEntryAmericanFormula? })` covers the §9.1 cross-field rules; both optional flags default to `true` (strict for P3 Cosmos) and are passed as `false` for mock-generated records whose `pick_id` and `entry_american_odds` are preserved verbatim from seed data (§8.3)."*
+   - However, in [conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md#L460-L464), the §9 JSON Schema itself defines:
      ```json
-     {
-       "type": "FAV_SPR<",
-       "code": "T1_-6.5_1.91",
-       "id": "2002_FAV_SPR_us",
-       "bookmaker": { "position": "-6.5", "bet_line": "T1_spread_under" }
+     "pick_id": {
+       "type": "string",
+       "pattern": "^[1-9][0-9]*\\|(?:(?:moneyline|spread_t[12]|total_(?:over|under)|team_total_t[12]_(?:over|under))\\|(?:t1|t2|over|under)\\|(?:na|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?)|[1-9][0-9]*\\|[a-z0-9_]+\\|player_(?:over|under|yes|no)\\|(?:na|-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?))\\|main\\|(?:full|reg|1h|2h|1q|2q|3q|4q|1p|2p|3p|f5)\\|(?:au|us)$"
      }
      ```
-     `bookmaker.position` is `"-6.5"` — **already signed negative**, not an unsigned magnitude! Negating `Number(position)` without `Math.abs` flips `-6.5` to `+6.5`.
-   - Furthermore, in [`generateBetTypeDescription`](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L170-L243) (which builds the top-level `pickDescription`), the BFF does **not** use `bookmaker.bet_line` or `bookmaker.position` for Format A spreads—it parses `const [teamIdentifier, positionIdentifier] = pick.code.split("_")` (`top-pick.ts:170, 225, 241`). In [data-c-nba-wltp-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-wltp-dev-v2.json) (`game_sk: 31679`), `code` is `"T1_9.5_1.95"` while `bet_line` is `"T2_spread_under"`. Reading `bet_line` in `legacy-selection.ts` makes `edge_pick` say `away -9.5` while `pickDescription` on the same card says `Home +9.5 PTS`.
-2. **Format A Player Prop `player_yes` (`2002_player_TD_au` and `2002_player_TD_us` in [data-c-nfl-ps-dev.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nfl-ps-dev.json)):**
-   - In `nfl 2002`, Christian McCaffrey's touchdown prop has `type: "player_yes"`, `stat: "TD"`, `stat_name: "any touchdown"`, `bookmaker: { position: 0.5, bet_line: "yes" }`.
-   - [`top-pick.ts:696-698, 725-727`](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L696-L727) explicitly maps `player_yes` / `bet_line: "yes"` to `"Over"` (`"Christian McCaffrey Over 0.5 Any Touchdown"`), and preserves `bet_type: "player_yes"` (line 748).
-   - Because `Appendix A.5` only matches `player_over`/`player_under`, `legacy-selection.ts` returns `null` for `2002_player_TD_au` and `2002_player_TD_us`.
-3. **Format A H2H with `bet_line: null` (`37_H2H` in [data-c-nba-wltp-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-wltp-dev-v2.json)):**
-   - `37_H2H` has `code: "T2_null_2.15"` and `bookmaker.bet_line: null`. [`resolveBookmakerBetLine`](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L115-L122) falls back to `pick.code.split("_")[0]` (`"T2"` $\to$ `"T2_h2h"`). `Appendix A.5` must use the same fallback.
+   - We ran this regex against every pick in `/mnt/devel/xosports/reqs/nba/tools/nba_mock_data_2weeks.json` (1,070 picks) and `/mnt/devel/xosports/github/mobile-server/script/db-seeds/*.json`:
+     - **In `nba_mock_data_2weeks.json`, 336 out of 1,070 picks FAIL `properties.pick_id.pattern`:**
+       - **300 `player_milestone` picks** (e.g., `40021717855|400003547276|ast|player_milestone|6|main|full|us`), because `§8.3` step 1 preserves `pick_id` verbatim (containing `|player_milestone|6|`) while step 2 normalizes `bet_type` to `"player_over"` and `entry_line` to `5.5`.
+       - **36 `alternate` game picks** (e.g., `40021717857|spread_t1|t1|-7.5|alternate|full|us`), because `pick_id` contains `|alternate|` whereas the regex hardcodes `\|main\|`.
+     - **In `script/db-seeds/*.json`, 100% of Format A and Format B picks (137 picks across MLB, NFL, EPL, AFL, NRL, CPL, Squash, TD, Legacy NBA) FAIL `properties.pick_id.pattern`** (e.g., `2001_H2H_us`, `100076741|11013473|R|player_under|au`, `2001_player_PaTDs_us`).
+   - Because `properties.pick_id.pattern` is in `ProducerRecordSchema` (§9) rather than gated by `checkIdFormula` (§9.1), `ProducerRecordSchema.safeParse(rec)` rejects all 336 NBA picks and all 137 Format A/B seed picks!
 
-#### Required Fix
-Update `Appendix A.5` (`legacy-selection.ts`):
-- **Format A spread:** Parse slot (`T1` $\to$ `home`, `T2` $\to$ `away`) and signed line from `pick.code.split("_")` when `pick.code` is present (and apply `-Math.abs(line)` for `FAV_SPR*`/`spread_fav` or `+Math.abs(line)` for `UD_SPR*`/`spread_dog` only when `code`'s line is unsigned and conflicts with `FAV_`); fall back to `bet_line` prefix + `±Math.abs(Number(position))` when `pick.code` is absent.
-- **Format A player:** Accept `bet_type` in `["player_over", "player_under", "player_yes"]` (or `bet_line` in `["over", "under", "yes"]`), mapping `player_yes`/`yes` with numeric `position` (`0.5`) to `market: "player_prop"`, `selection: "over"`, `line: Number(position)`.
-- **Format A H2H:** Use `resolveBookmakerBetLine(pick, bookmaker.bet_line)` so `bet_line: null` falls back to `pick.code` prefix (`T1_`/`T2_`).
+2. **Four concrete seed/file quirks in `§8.2` / `§8.3`:**
+   - **External path of `nba_mock_data_2weeks.json`:** `§8.2` line 446 refers to `nba_mock_data_2weeks.json` without a path. It resides at `/mnt/devel/xosports/reqs/nba/tools/nba_mock_data_2weeks.json` (outside both `xo-scratchpad` and `mobile-server`). The generator should accept `--nba-mock <path>` (defaulting to `/mnt/devel/xosports/reqs/nba/tools/nba_mock_data_2weeks.json` if present, or copying it into `mobile-server/script/db-seeds/`).
+   - **Null placeholder `top_picks` in `script/db-seeds/`:** In [data-c-wltp-dev-v4.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-wltp-dev-v4.json) (`id: "nba|game_prediction|4"`) and [data-c-nba-wltp-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-wltp-dev-v2.json) (`id: "1072"`), `au.top_picks[0]` is a placeholder object `{ id: null, type: null, probability: null, decimal_odds: null, ... }`. `generateTopPicks` in [top-pick.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L316) skips picks missing `type` or `decimal_odds`; the §8.3 generator must do the same (`if (!pick.id || !pick.type || pick.decimal_odds == null) continue`).
+   - **String `player_sk` in `data-c-nba-ps-dev-v2.json`:** In [data-c-nba-ps-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-ps-dev-v2.json) (`id: "mlb|player_top_picks|100077296"`), `player_sk` is `"11007152"` (a string, whereas `ProducerRecordSchema` requires `integer | null`). Step 1 of `§8.3` must coerce `player_sk` via `Number(raw.player_sk)`.
+   - **Duplicate and cross-region `pick_id`s in `script/db-seeds/`:**
+     - `100077282|11005503|R|player_under|au` appears **twice** in `au.team_1.picks` of `mlb|player_top_picks|100077282` ([data-c-nba-ps-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-ps-dev-v2.json)).
+     - `100077296|11007152|HR|player_under|au` is used inside **both** `au` and `us` of `mlb|player_top_picks|100077296` ([data-c-nba-ps-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-ps-dev-v2.json)).
+     - `992_lower_TP` (no region suffix) is used inside **both** `au` and `us` of `id: "992"` ([data-c-wltp-dev-v3.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-wltp-dev-v3.json)).
+     Therefore, `mock-source.ts` (`§5.4`) and `generate-mock-edge-picks.ts` (`§8.3`) must key records by **`(region, pick_id)`** (not `pick_id` alone) and deduplicate identical `(region, pick_id)` entries within the same document.
 
----
-
-### F-05 [HIGH]: `injectCancelledPicks` (`§5.3` & `Appendix A.3`) Fails to Null Top-Level Locked Fields on Pre-Game Cancelled Picks (`SEC-R-002` Leak)
-
-#### Plan Quotations
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L262) (§5.3, line 262):**
-  > "`injectCancelledPicks` runs inside the `applyIfFreemium` callback (`matches-top-predictions-v3.ts:303`), **after** `applyFreemiumToTopPicksResponse` so free-user `selectTopKUnlockedIds` ranking and `locks` are computed on listed picks only, and **before** `attachEdgePicks` so injected picks get their `edge_pick` redacted by the same function."
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L738-L750) (Appendix A.3, lines 738–750):**
-  > "- `pickDescription`: built from the record (`{Player} Over {line} {Stat}`, `{Team} {±line}`, `Over/Under {line}`, `{Team}` for moneyline)
-  > - `probability`: `record.probability`
-  > - `bookmaker`: `{ name: record.bookmaker, bet_stake: record.stake_units, bet_price: record.entry_decimal_odds, bet_odds: { decimal_odds: record.entry_decimal_odds, american_odds: record.entry_american_odds } }`
-  > - `market_odds`: `record.entry_decimal_odds`
-  > - `locked`: free user and game not completed ⇒ `true`; otherwise absent
-  > - `edge_pick`: `buildBlock(record, game, outcomeDoc, now)`"
-
-#### Proof of Defect
-1. For listed picks, [`applyFreemiumToTopPicksResponse`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/top-picks.ts#L132-L144) calls [`nullifyLockedPickFields`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/resolve/locked-pick-response.ts#L206-L246) on every pick with `locked: true`, stripping `pickDescription`, `probability`, `bookmaker`, `market_odds`, and identity keys (`player_full_name`, `team_full_name`, `line`, `selection`).
-2. Because `injectCancelledPicks` runs **after** `applyFreemiumToTopPicksResponse` and `attachEdgePicks` only redacts the nested `pick.edge_pick` block (`§5.5` lines 318–328), **the top-level fields of a locked injected cancelled pick (`pickDescription`, `probability`, `bookmaker`, `market_odds`, `player_full_name`) are sent completely unredacted over the wire to free users!**
-3. Even worse: if all *listed* picks on that day are completed or within the free $K$ quota (`anyActiveLocked === false` in [`top-picks.ts:165`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/top-picks.ts#L165)), `body.locks` is `undefined`, or if `locks` is present, any field fallback in the client (or network inspection) sees the full unredacted top-level pick fields (`SEC-R-002`).
-
-#### Required Fix
-In `Appendix A.3` (`inject-cancelled.ts`), when an injected cancelled pick is created for a free user on an uncompleted game (`locked: true`), pass the constructed top-level item through [`nullifyLockedPickFields(item, getFreemiumConfig(), false)`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/resolve/locked-pick-response.ts#L206) before `attachEdgePicks` runs.
+#### Concrete Fix for `option-b-plan.md`
+1. **In `§5.2` `BE-1` (line 243) and `§8.3` (line 454):**
+   - Relax `pick_id` in `ProducerRecordSchema` to `z.string().min(1)` (matching `v4.schema.ts:276`), and enforce the strict canonical v4 `pick_id` regex **inside `recordInvariantViolations` when `checkIdFormula === true`** (alongside the `build_pick_id()` reconstruction check). That way, P3 Cosmos (`checkIdFormula: true`) enforces both the regex and the reconstruction formula, while P2 Mock (`checkIdFormula: false`) validates all 37 fields and all numerical/state invariants without rejecting preserved legacy/milestone/alternate `pick_id` strings.
+2. **In `§5.4` (`mock-source.ts`, line 276) and `§8.3` (lines 451–454):**
+   - Index mock records by `${region}:${pick_id}` (or two maps `au` and `us` keyed by `pick_id`), skip null placeholder picks (`!pick.id || !pick.type || pick.decimal_odds == null`), deduplicate repeated `(region, pick_id)` entries, and coerce `player_sk` with `Number(raw.player_sk)`.
 
 ---
 
-### F-06 [HIGH]: Three App Integration Bugs in `EdgePicksCard.tsx` (`FE-3`, `FE-6`, and Missing Settled `outcome` Wiring)
+### `R2-03` [HIGH] `legacy-selection.ts` (`Appendix A.5`) Inspects `pick.type` and `pick.code`, Which Are Overwritten or Stripped on Derived v3 Picks in `matches-top-predictions-v3.ts`, and Misses `buildFeaturedH2hDetailPick`
 
-#### Plan Quotations
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L108) (§2.2, line 108):**
-  > "| `EdgePicksCard.tsx:218–224` (`XTP-125`) | Footer `outcome` is hardcoded `null`; Add button checks only `status === GAME_STATUS.COMPLETED` — not disabled when `edge_pick.status === "cancelled"`. |"
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L400-L403) (§7.1 `FE-3` & `FE-6`, lines 400, 403):**
-  > "| `FE-3` | Read original and current odds from `edge_pick`: `app/screens/TopPicksScreen/bookmakerOdds.ts:56–89` | Original: `pick.edge_pick?.entry` (`odds_american` / `odds_decimal`) before `bookmaker?.bet_odds`. Current: when `pick.edge_pick?.current` is non-null **and** `pick.edge_pick.edge_state !== "moved"` (`R5`), format `{ american_odds: current.odds_american, decimal_odds: current.odds_decimal }` and show when different from original; when `edge_state === "moved"` or `current` is null, `currentOdds: null`. Bookmaker name: `pick.edge_pick?.bookmaker ?? bookmaker?.name` |"
-  > "| `FE-6` | Cancelled state (`status === "cancelled"`, reason pill, disabled Add): `EdgePicksCard.tsx` | ... Chip and footer Add button enabled only when `edge_pick` is null or `edge_pick.status === "open"` |"
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L554) (§10.1 `V-FE-1`, line 554):**
-  > "| `V-FE-1` | `EdgePicksCard.test.tsx`, `bookmakerOdds.test.ts` | Card renders: `live` (single price), `narrowing`/`closed` (struck original + current + pill), `moved` (entry price + moved pill, no cross-line current price), `cancelled` (reason pill + disabled Add), `settled` (`won`/`lost`/`push`), locked free card (blurred, no leak) |"
+#### Where in `option-b-plan.md`
+- `§5.1` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L219-L228))
+- `§5.2` `BE-5` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L247))
+- `Appendix A.1` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L700-L725))
+- `Appendix A.5` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L784-L819))
 
-#### Proof Against `origin/feat/XTP-125-Edge-Picks-Redesign-Oct26` (`88de3461`)
-1. **Bug 6a (`FE-3` never receives `pick.edge_pick`):**
-   Look at `EdgePicksCard.tsx` lines 92–100 on `88de3461`:
-   ```tsx
-   const bookmakerOddsPick: BookmakerOddsPick = {
-     bookmaker: pick.bookmaker,
-     american_odds: pick.american_odds,
-     decimal_odds: pick.decimal_odds,
-     market_odds: pick.market_odds,
-     current_odds: pick.current_odds,
-     current_american_odds: pick.current_american_odds,
-     current_decimal_odds: pick.current_decimal_odds,
-   }
-   ```
-   `EdgePicksCard.tsx` passes `bookmakerOddsPick` (not `pick`) to `<BookmakerOddsChip pick={bookmakerOddsPick} />`. Because `bookmakerOddsPick` does not include `edge_pick: pick.edge_pick`, `pick.edge_pick` inside `bookmakerOddsView(pick, ...)` is **always `undefined`**! `FE-3` must also update `EdgePicksCard.tsx:92–100` (and `BookmakerOddsPick` in `bookmakerOdds.ts:15–23`) to pass `edge_pick: pick.edge_pick`.
-2. **Bug 6b (Settled `outcome` is hardcoded `null` on `EdgePicksCard.tsx:281` and `"push"` is missing from `PredictionOutcome`):**
-   `§2.2` line 108 diagnoses that `EdgePicksCard.tsx` hardcodes `outcome={null}` on `CardOutcomeFooterRow` (line 281), and `V-FE-1` (line 554) tests that `EdgePicksCard` renders `settled` (`won`/`lost`/`push`). However, **`§7.1` (`FE-1`..`FE-8`) has no work item to replace `outcome={null}` in `EdgePicksCard.tsx` or to add `"push"` to [`PredictionOutcome`](file:///mnt/devel/xosports/github/mobile-app/app/utils/predictionOutcome.ts#L1) and [`PredictionOutcomeIndicator.tsx`](file:///mnt/devel/xosports/github/mobile-app/app/components/common/PredictionOutcomeIndicator.tsx#L12-L22)!**
-3. **Bug 6c (`FE-6` Add-to-Slip button enabled on `Postponed` games and completed fallback picks):**
-   - Under `§3 D7` and `Appendix A.4` (line 763), a `Postponed` game (such as `40021717949` on `2026-10-25`) has top-level `status: "Postponed"` and `edge_pick.status: "open"`.
-   - Under `FE-6` (*"Chip and footer Add button enabled only when `edge_pick` is null or `edge_pick.status === "open"`"*), both the odds chip and footer Add button remain **enabled** on a `Postponed` game, and on any completed/cancelled card where `edge_pick` is `null` (`BookmakerOddsChip` on `EdgePicksCard.tsx:172` currently only checks `disabled={isActiveSubscription === null}`, not game status!).
+#### Evidence & Failure Mechanism
+In `matches-top-predictions-v3.ts`, `getAllAvailableTopPicksForGame` ([common.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/common.ts#L133-L253)) transforms raw Cosmos documents into **derived v3 picks** before returning them to the handler:
+1. **`pick.type` is overwritten with `"match"` or `"player"`:**
+   - In `generateTopPicks` ([top-pick.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L343-L345)), `generatePlayerTopPicks` ([top-pick.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L746-L748)), `mapCanonicalGamePick` ([picks.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/canonical/picks.ts#L465-L466)), and `mapCanonicalPlayerPick` ([picks.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/canonical/picks.ts#L690-L691)), the derived v3 pick sets:
+     ```ts
+     bet_type: pick.type,
+     type: "match", // or "player"
+     ```
+   - `Appendix A.5` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L788-L807)) switches on `pick.type` (`"H2H"`, `"UND_SPR+"`, `"player_over"`, etc.). When called from `buildBlock` on a derived v3 pick, `pick.type` is `"match"` or `"player"`, so **every single branch in `Appendix A.5` fails to match** unless it reads `const rawType = pick.bet_type ?? pick.type`!
+2. **`pick.code` is overwritten on Format B player picks and stripped on Format C picks:**
+   - In `generatePlayerTopPicks` ([top-pick.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L744-L753)):
+     ```ts
+     const teamInfo = getTeamInfo(sport, teamKey, scheduleData);
+     return {
+       ...pick,
+       ...
+       code: teamInfo.code,
+     };
+     ```
+     For Format B player picks (where `pick.type` in the seed was `"player_over"` / `"player_under"` and `pick.code` was `"R"`, `"HR"`, `"H"`, `"SO"`, `"RBI"`, `"PTS"`, etc.), the derived v3 pick has **`pick.code` overwritten with the team abbreviation** (e.g., `"CHC"`, `"ATL"`), and the original stat code only survives inside the 3rd pipe segment of `pick.id` (`100076741|11013473|R|player_under|au`) or in `pick.shortPickDescription` / `pick.pickDescription`!
+   - In `mapCanonicalGamePick` ([picks.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/canonical/picks.ts#L447)) and `mapCanonicalPlayerPick` ([picks.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/canonical/picks.ts#L604)), `code: _code` is destructured and **stripped** from the returned v3 pick (`stat_code` is also stripped in `mapCanonicalPlayerPick` at line 607, surviving only in the 3rd pipe segment of `pick.id` or `pick.statType`).
+   - In `generateTopPicks` ([top-pick.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L337-L347)), `...pick` preserves `pick.code` on Format A game picks (so `code: "DAL -7.0"` is still present on Format A derived game picks).
+3. **Featured H2H picks (`buildFeaturedH2hDetailPick`) are unshifted in `matches-top-predictions-v3.ts`:**
+   - At [matches-top-predictions-v3.ts](file:///mnt/devel/xosports/github/mobile-server/src/functions/matches-top-predictions-v3.ts#L229-L239), when `wltp?.is_top_pick === true` on a non-canonical game (which occurs on 25 legacy seed games in `script/db-seeds/`), the handler unshifts `buildFeaturedH2hDetailPick(...)` ([game-h2h.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/game-h2h.ts#L223-L297)).
+   - That object has `id: "h2h:<league>:<gameSk>:<teamSk>"` (when odds exist), `type: "match"`, `pick: "<Team Name>"`, `pickDescription: "<Team Name> to Win"`, `probability`, `american_odds`, `decimal_odds`, `market_odds`, and `bookmaker: { name, odds, american_odds, decimal_odds, url }` — **no `bet_type`, no `code`, no `bet_line`, and no `stake_units`/`bet_stake`**.
+   - Even worse, if `hasTeamGameOdds(odds)` is `false` or `winLoss` is draw ([game-h2h.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/game-h2h.ts#L240-L261)), `buildFeaturedH2hDetailPick` returns an object with **no `id` and no odds at all**!
 
-#### Required Fix
-- In `FE-3`: Add `edge_pick?: EdgePickBlock | null` to `BookmakerOddsPick` and pass `edge_pick: pick.edge_pick` in `EdgePicksCard.tsx:92–100`.
-- In `FE-6`: Define `const canAddPick = (status === GAME_STATUS.SCHEDULED || status === GAME_STATUS.UPCOMING || !status) && (pick.edge_pick == null || pick.edge_pick.status === "open")` and gate both `BookmakerOddsChip` and the footer Add button on `canAddPick`.
-- Add `FE-9` to `§7.1`: Wire `outcome` in `EdgePicksCard.tsx:281` from `pick.edge_pick?.outcome` (`"won" -> "correct"`, `"lost" -> "incorrect"`, `"push" -> "push"`, `"void" -> "void"`, falling back to `isGameCompleted ? mapPickOutcome(pick.pickOutcome) : null`), and add `"push"` to [`predictionOutcome.ts`](file:///mnt/devel/xosports/github/mobile-app/app/utils/predictionOutcome.ts) and [`PredictionOutcomeIndicator.tsx`](file:///mnt/devel/xosports/github/mobile-app/app/components/common/PredictionOutcomeIndicator.tsx).
-
----
-
-### F-07 [HIGH]: My Picks Settlement (`MP-5`) Targets the Wrong File for `v3`, Leaves Cancelled-Leg Slips Unsettled Forever, and Renders `outcome: 2` (Push/Void) as a Green Win Checkmark in `MyPicksItem.tsx` & `PickGroupCard.tsx`
-
-#### Plan Quotations
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L112) (§2.2, line 112):**
-  > "| `MyPicksItem.tsx` | Line 50 uses `resolveBookmaker(pick.bookmaker)` (already handles object or array). Line 101 renders `pick.outcome ? "tick" : "close_red"` — binary only, no push/void state, and live rows currently omit `outcome` (`§2.1`). |"
-- **[option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L385) (§6 `MP-5`, line 385):**
-  > "| `MP-5` | `src/lib/my-pick/resolve-my-picks-list.ts:303–314`, `src/lib/my-pick/snapshot.ts:332–373`, `src/functions/my-picks-v2.ts:177–218` | (a) On live rows (`resolve-my-picks-list.ts:303–314`), set `outcome: resolvedPick.outcome ?? resolvedPick.pickOutcome ?? null` (`hydratePickFromSnapshot` already sets it at `snapshot.ts:371`). (b) For `outcome === 2`, expose `outcome_label: "push"` when the market is a spread or total on a whole-number line, else `"void"` (contract §4.2, §7.6). (c) On a settled slip (`status: true`, `my-picks-v2.ts:195`), set `returnAmount: 0` when any leg has `outcome === 0`; for a `push`/`void` leg, treat its decimal odds factor as `1.0` in the slip return. (d) When `c-outcome` has no row, take the outcome from the producer record by pick id once a record source exists |"
-
-#### Three Concrete Bugs
-1. **Bug 7a (`MP-5(c)` edits `my-picks-v2.ts`, which `GET /my-picks-v2?api_version=v3` bypasses):**
-   - Both `GET /my-picks-v2?api_version=v3` ([`my-picks-v2.ts:89-111`](file:///mnt/devel/xosports/github/mobile-server/src/functions/my-picks-v2.ts#L89-L111)) and `GET /v3/my-picks` ([`my-picks-v3.ts:66-86`](file:///mnt/devel/xosports/github/mobile-server/src/functions/my-picks-v3.ts#L66-L86)) call [`resolveMyPicksListForUser`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/resolve-my-picks-list.ts#L317), which delegates slip total calculation to [`buildMyPickSlipResponse`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L162-L213) in `src/lib/my-pick/my-pick.ts`!
-   - Also note two existing bugs in [`buildMyPickSlipResponse`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L183-L194):
-     - Line 186 reads `item.decimal_odds ?? item.marketOdds`, which is `undefined` (`0`) on live rows without a snapshot (they carry `market_odds` and `bookmaker.bet_odds.decimal_odds`).
-     - Line 190 reads `item.xoProbability` (which is never set on `v3` rows; they set `item.probability`), so `combinedProbability` is always `1`!
-2. **Bug 7b (Slips with a cancelled game or pre-game cancelled leg never settle):**
-   - In [`resolve-my-picks-list.ts:312`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/resolve-my-picks-list.ts#L312), `item.status` is set to `schedule?.outcome?.game_status ?? ""`, and in [`my-pick.ts:196`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L196), slip `status` is `sortedActiveItems.every((item) => item.status === "Completed")`.
-   - If a game in a slip is `"Cancelled"` (e.g., `40021717950` on `2026-10-25`, where `outcome.game_status === "Cancelled"`) or if a pick was cancelled/voided and hydrated from snapshot (`outcome === 2`), `item.status === "Completed"` is `false`, so the slip remains `status: false` (stuck in the "Current" tab forever instead of moving to "Completed").
-   - A leg is settled when `item.status === "Completed" || item.status === "Cancelled" || item.status === "Canceled" || item.status === "Abandoned" || item.outcome === 0 || item.outcome === 1 || item.outcome === 2`.
-3. **Bug 7c (`MyPicksItem.tsx:101` and `PickGroupCard.tsx:57` treat `outcome: 2` as Won):**
-   - In [`MyPicksItem.tsx:101`](file:///mnt/devel/xosports/github/mobile-app/app/components/MyPicks/MyPicksItem.tsx#L101): `icon={pick.outcome ? "tick" : "close_red"}` and `color={pick.outcome ? colors.palette.green : colors.palette.red}`.
-   - In [`PickGroupCard.tsx:56-60`](file:///mnt/devel/xosports/github/mobile-app/app/screens/MyPicksScreen/components/PickGroupCard.tsx#L56-L60): `const overallOutcome = isCompleted ? group.items?.some((p) => !p.outcome) ? false : true : undefined`.
-   - Because `2` is truthy in JavaScript (`Boolean(2) === true`, `!2 === false`), a voided/pushed leg (`outcome: 2`) renders with a **green win checkmark (`tick`)** on `MyPicksItem`, and a completed slip whose legs are `outcome: 1` and `outcome: 2` (or a single-leg voided slip with `outcome: 2`) renders with a green Won badge in `PickGroupCard`!
-
-#### Required Fix
-1. In `MP-5`: Target [`src/lib/my-pick/my-pick.ts:162–213`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L162-L213) (`buildMyPickSlipResponse`) in addition to `my-picks-v2.ts:355–400`:
-   - Read leg odds from `item.decimal_odds ?? item.market_odds ?? item.marketOdds ?? item.bookmaker?.bet_odds?.decimal_odds` (and use factor `1.0` when `item.outcome === 2`).
-   - Read leg probability from `item.probability ?? item.xoProbability`.
-   - Set slip `status = sortedActiveItems.every((item) => item.status === "Completed" || item.outcome !== null && item.outcome !== undefined)`.
-   - When `status` is `true` and any leg has `item.outcome === 0`, set `returnAmount: 0`.
-2. In `§7.1`: Add a frontend task (`FE-10`) to update [`MyPicksItem.tsx:98–105`](file:///mnt/devel/xosports/github/mobile-app/app/components/MyPicks/MyPicksItem.tsx#L98-L105) and [`PickGroupCard.tsx:56–60`](file:///mnt/devel/xosports/github/mobile-app/app/screens/MyPicksScreen/components/PickGroupCard.tsx#L56-L60) so `pick.outcome === 2` renders a neutral dash/minus (or `pick.outcome_label` `"Push"` / `"Void"`) instead of a green win tick, and `PickGroupCard` only marks `overallOutcome` as won when at least one leg has `outcome === 1` and no leg has `outcome === 0` (neutral/push when all legs have `outcome === 2`).
+#### Concrete Fix for `option-b-plan.md`
+Update `Appendix A.5` (`legacy-selection.ts`) and `Appendix A.1` (`build-block.ts`) so `legacy-selection.ts` works identically whether passed a **raw seed pick** (in `generate-mock-edge-picks.ts`) or a **derived v3 pick** (in `buildBlock` / `capturePickSnapshot` / `resolve-my-picks-list.ts`):
+1. Read `const rawType = pick.bet_type ?? pick.type`.
+2. For Format B/C player picks where `pick.code` was overwritten by `teamInfo.code` or stripped, extract `stat_code` from:
+   - `pick.stat_code` (if present on raw Format C), else
+   - the 3rd pipe segment of `pick.id` (`pick.id.split("|")[2]`) when `pick.id` is pipe-delimited (`Format B` / `Format C`), else
+   - `pick.code` (for Format A `player_<STAT>` picks where `pick.type === "player"` in raw seed and `pick.code` is `"PaTDs"`, `"RecYds"`, etc.).
+3. Handle `buildFeaturedH2hDetailPick` (`typeof pick.id === "string" && pick.id.startsWith("h2h:")` or `rawType === "match" && !pick.bet_type && /to Win$/i.test(pick.pickDescription ?? "")`):
+   - Map to `{ market: "moneyline", side: pick.team_sk === schedule?.team_1_sk ? "t1" : "t2", line: null, stat_code: null }`.
+   - In `Appendix A.1`, if a featured H2H pick has no `id` or no `decimal_odds` (the odds-less fallback in `game-h2h.ts:240-261`), skip attaching `edge_pick` (leave `edge_pick` omitted) so `EdgePickBlockSchema` is never called with `id: undefined` or `odds: null` on an unlocked pick.
 
 ---
 
-## 4. Medium & Low Severity Findings
+### `R2-04` [HIGH] Execution Order in `§5.1` Runs `NEW ②` `attachEdgePicks` Before `NEW ③` `injectCancelledPicks`, Leaving Injected Picks Unredacted, Unvalidated, and Uncounted in `body.count`
 
-### F-08 [MEDIUM]: `legacyLifecycle` (`Appendix A.4`) vs. `isMatchCompleted` Can Produce `status: "settled" | "void"` with `access.locked: true`, Failing `EdgePickBlockSchema`
-- **Where:** `§4.3` (line 205), `§5.5` (lines 321–325), `Appendix A.4` (lines 759–762).
-- **Issue:** In `Appendix A.4`, rows 2–5 map `pickOutcome` `0`, `1`, `2` to `status: "settled"` or `"void"` regardless of whether the game is completed. Meanwhile, [`applyFreemiumToTopPicksResponse`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/top-picks.ts#L123) uses [`isMatchCompleted(pick)`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/completed-bypass.ts#L52-L63), which only checks `pick.status` / `pick.outcome.game_status` (the **game** status). In [data-c-nba-ps-dev-v2.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-nba-ps-dev-v2.json) (`game_sk: 100077296`), pick `100077296|11007152|HR|player_under|au` has `bet_outcome: 0` while the game is still `"scheduled"`, and in production a player prop can be voided (`dnp`) or settled before the game's final whistle. That produces `edge_pick.status: "settled"` or `"void"` while `pick.locked === true` (`edge_pick.access.locked: true`), which fails the [`v4.schema.ts:442-449`](file:///mnt/devel/xosports/github/mobile-server/src/contracts/edge-picks/v4.schema.ts#L442-L449) refinement (*"settled, void, and completed-game picks are never locked"*).
-- **Fix:** In `attachEdgePicks` (`§5.5`), treat `const isUnlockedTerminal = raw.status === "settled" || raw.status === "void"` as unlocked (`locked = false`, `pick.locked = false`), or in [`isMatchCompleted`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/completed-bypass.ts#L52-L63) / `legacyLifecycle` gate `settled` on game completion.
+#### Where in `option-b-plan.md`
+- `§4.2` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L154))
+- `§5.1` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L219-L228))
+- `Appendix A.3` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L747-L764))
 
-### F-09 [MEDIUM]: Whole-Number `player_prop` Push Excluded in `Appendix A.4` (Line 761) and `MP-5(b)` (Line 385)
-- **Where:** `Appendix A.4` (lines 761–762) and `§6 MP-5(b)` (line 385).
-- **Issue:** Both places state that `pickOutcome === 2` maps to `settled` / `push` only when *"the market is a spread or total on a whole-number line, else `void`"*. However, [conf-schema-contracts.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/conf-schema-contracts.md#L98-L100) §4.2 explicitly includes whole-number player props:
-  > "Use `pick_status = "settled"` with `outcome = "push"` when the game and prop were validly played to completion and the final result landed **exactly on a whole-number entry `line`** (e.g., spread `-3.0` with a 3-point margin, total `220.0` with 220 combined points, or a whole-number player prop `line` with the player finishing on that exact stat total)."
-- **Fix:** Allow `market === "player_prop"` with a whole-number `line` (`Number.isInteger(line)`) and `record?.status_reason == null` to map `pickOutcome === 2` to `settled` / `push`.
+#### Evidence & Failure Mechanism
+In `§5.1` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L220-L227)), the pipeline inside `matches-top-predictions-v3.ts` is ordered as:
+```text
+├── build originBody = { count, top_picks }
+├── NEW ① if apiVersionMajor >= 7:
+│     records = recordSource.load({ date, tzOffset, region, sport })
+│     blocks  = Map<pickId, EdgePickBlock> via buildBlock(pick, records.get(pick.id), ctx)
+├── applyIfFreemium(originBody)  ── existing freemium pass (unchanged)
+├── NEW ② attachEdgePicks(body, blocks, freemiumCtx): redact per pick, validate (BE-6)
+├── NEW ③ inject cancelled v4 picks not in the list (P4) (BE-11)
+└── responseCache.getOrSet(cacheKey, ...)
+```
+Look at what happens when `NEW ③` (`injectCancelledPicks`) runs **after** `NEW ②` (`attachEdgePicks`):
+1. `Appendix A.3` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L754-L756)) says:
+   > *"When `locked === true`, the v3 fields are nulled with the same `stripAsLockedTopPick(synthesisedPick)` helper that `src/freemium/apply/top-picks.ts` uses (`locked: true`, `CENSORED_PICK_FIELDS` set to `null`) and `edge_pick` is redacted by the same `attachEdgePicks` rule."*
+   And `§4.2` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L154)) says:
+   > *"`count` counts every item in `top_picks`, injected picks included."*
+2. If `NEW ③` runs after `NEW ②`, `attachEdgePicks` has already finished! Unless `injectCancelledPicks` duplicates `attachEdgePicks` (group redaction + `EdgePickBlockSchema` validation) and manually mutates `body.count = body.top_picks.length`, injected cancelled picks will skip `attachEdgePicks` and `body.count` will be stale.
+3. Furthermore, if `injectCancelledPicks` runs **before** `attachEdgePicks` (or if `injectCancelledPicks` synthesizes the cancelled v3 pick + unredacted `EdgePickBlock` into `blocks` before `attachEdgePicks` runs, and updates `body.count = body.top_picks.length`), then `attachEdgePicks` handles redaction and `EdgePickBlockSchema` validation uniformly in one place for both regular and injected picks.
 
-### F-10 [MEDIUM]: `edgePickTitle.ts` (`FE-2`) and `EdgeValueBadge.tsx` (`FE-4`) Edge Cases
-- **Where:** `§7.1 FE-2` (line 399) and `FE-4` (line 401).
-- **Issues:**
-  1. In `edgePickTitle.ts` (`origin/feat/XTP-125-Edge-Picks-Redesign-Oct26`), `selectionTeam(pick)` (lines 76–85) only ignores `over` and `under` (`if (!selection || key === "over" || key === "under") return ""`). When `FE-2` feeds `pick.edge_pick?.selection` into `edgePickTitle.ts`:
-     - For EPL `btts` (`market: "btts"`, `selection: "yes" | "no"`, e.g. `500000123_BTTS_NO_us` in [data-c-epl-wltp-dev.json](file:///mnt/devel/xosports/github/mobile-server/script/db-seeds/data-c-epl-wltp-dev.json)), `marketKind` returns `"other"` and `selectionTeam` returns `"no"`, producing title `"no"` instead of `"Both Teams To Score - No"` / `"BTTS - No"`.
-     - For EPL 3-way moneyline draw (`market: "moneyline"`, `selection: "draw"`), `selectionTeam` returns lowercase `"draw"` instead of `"Draw"`.
-     - On fallback cards (`edge_pick: null`) for canonical NBA game picks, top-level `pick.selection` is `"t1"` or `"t2"`, which `selectionTeam` does not map to `teamSideName(pick, 1 | 2)` (it only checks `"home" | "team_1" | "team1"`).
-  2. In `EdgeValueBadge.tsx` (line 17), `toEdgePercent(value)` is `Math.abs(value) <= 1 ? value * 100 : value`. Because `edge_pick.entry.edge` is always a fraction (`EdgeFractionSchema` in `[-1, 10]`), any high-odds EV pick with `edge > 1.0` (i.e. $> 100\%$ EV) is not multiplied by `100` and displays `+1.2%` instead of `+120%`. Furthermore, when `edge_state === "closed"`, `EdgeValueBadge` uses the same `colors.palette.orange` downward arrow as `narrowing` even when `current.edge <= 0`.
-- **Fix:**
-  - In `FE-2` (`edgePickTitle.ts`): Map `"t1"` $\to$ side 1, `"t2"` $\to$ side 2, `"draw"` $\to$ `"Draw"`, and handle `market === "btts"` (`selection: "yes" | "no"` $\to$ title `"Both Teams To Score: Yes/No"`, subtitle `"BTTS"`).
-  - In `FE-4` (`EdgeValueBadge.tsx`): Since `FE-4` passes `edge_pick.entry.edge` and `edge_pick.current.edge` (which are always fractions), multiply by `100` unconditionally (or pass a `unit="fraction"` prop), and style `edge_state === "closed"` with muted/neutral or red tone distinct from `narrowing`.
-
-### F-11 [MEDIUM]: Injected Cancelled Picks Missing `prediction_type` (`Appendix A.3`) and Legacy Route Wiring (`§5.4`)
-- **Where:** `Appendix A.3` (line 739) and `§5.4` (line 280).
-- **Issues:**
-  1. `Appendix A.3` (line 739) sets `type: record.market === "player_prop" ? "player" : "match"` on injected cancelled picks, but omits `prediction_type` (and for player props, omits `player_full_name: record.player_name`, `stat_type: record.stat`, `stat_name: record.stat_name`). In `mobile-app`, [`transformTopPickData`](file:///mnt/devel/xosports/github/mobile-app/app/services/topPredictions/transformer.ts#L32) sets `prediction_type: apiData?.prediction_type ?? apiData?.type` (which works), **but** for player props [`formatEdgePickLines`](file:///mnt/devel/xosports/github/mobile-app/app/screens/TopPicksScreen/edgePickTitle.ts#L48-L54) reads `pick.player_full_name ?? pick.player_name ?? pick.playerName` and `pick.stat ?? pick.stat_name`! Because `Appendix A.3` only sets `pickDescription` and does not copy `player_full_name: record.player_name`, `stat: record.stat`, `stat_name: record.stat_name`, or `team_full_name: record.team_name` onto the injected row, an unlocked injected player prop renders on `EdgePicksCard` **without the player's team jersey (`logoTeam`) and with degraded title/subtitle parsing**!
-  2. `§5.4` (line 280) says to wire `buildBlock` into [`src/functions/matches-top-predictions.ts:171`](file:///mnt/devel/xosports/github/mobile-server/src/functions/matches-top-predictions.ts#L171) (the legacy non-`/v3/` route). That route does not run `applyFreemiumToTopPicksResponse`, `injectCancelledPicks`, or `attachEdgePicks`. Clarify in `§5.4` that on the legacy route `buildBlock` already sets `access: { locked: false, hidden: [] }` (since the legacy route is ungated) and does not inject cancelled picks.
-
-### F-12 [LOW]: Minor File & Line Reference Corrections
-- `§2.1` (line 81) & `§6 MP-6` (line 387): `src/functions/target-follow.ts:62` $\to$ [`src/functions/target-follow.ts:63`](file:///mnt/devel/xosports/github/mobile-server/src/functions/target-follow.ts#L63).
-- `§2.2` (line 108): `EdgePicksCard.tsx:218–224` $\to$ `EdgePicksCard.tsx:278–286` (on `origin/feat/XTP-125-Edge-Picks-Redesign-Oct26` at `88de3461`).
-- `§3 D5` (line 139): `src/lib/match/parsers/sections.ts` $\to$ [`src/lib/match/parsers/sections/index.ts`](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/parsers/sections/index.ts).
-- `§6 MP-5` (line 385): `src/functions/my-picks-v2.ts:177–218` (`my-picks-v2.ts:195`) $\to$ [`src/lib/my-pick/my-pick.ts:183–212`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L183-L212) (`my-pick.ts:196`) for `api_version=v3` and `my-picks-v2.ts:355–400` for legacy `v2`.
+#### Concrete Fix for `option-b-plan.md`
+Swap `NEW ②` and `NEW ③` in `§5.1` (lines 226–227):
+- **`NEW ②` `injectCancelledPicks(body, records, blocks, schedulesByGameSk, freemiumCtx)`:** For any record in `records` with `availability_status === "cancelled"` whose `pick_id` is not in `body.top_picks`, synthesize the v3 pick (applying `stripAsLockedTopPick` if `freemiumCtx.isFreemium && !shouldSkipFreemiumForGameStatus(schedule?.status)`), add its unredacted `EdgePickBlock` to `blocks`, append the pick to `body.top_picks`, and set `body.count = body.top_picks.length`.
+- **`NEW ③` `attachEdgePicks(body, blocks, freemiumCtx)`:** Redact each pick's block according to `pick.locked` and `hiddenGroupsFor(pick, block)`, and validate every block against `EdgePickBlockSchema` (logging `edge_pick.schema_violation` and omitting `edge_pick` on failure).
 
 ---
 
-## 5. Prioritized Action Plan to Update `option-b-plan.md`
+### `R2-05` [HIGH] `era: "legacy"` Sets `edge_pick.selection = null` (`§4.3` & `Appendix A.1`), Contradicting `§4.3` Line 204, `V-UNIT-3` Line 536, and `FE-6` Moneyline Exclusivity in P1
 
-Before starting Phase 1 implementation, apply the following targeted revisions to [option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md):
+#### Where in `option-b-plan.md`
+- `§4.3` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L167), [L203-L204](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L203-L204))
+- `§7.1` `FE-6` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L406))
+- `§9` `V-UNIT-3` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L536))
+- `Appendix A.1` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L710-L715))
 
-1. **Close the `MP-1` + `MP-4` Freemium Bypass (`§3 D3`, `§6 MP-1`, `MP-4`, `§10.1 V-INT-3`) [CRITICAL]:**
-   - Add `entitlementMiddleware` and `findUnavailableMyPickItemIds` (or subscriber/unlocked check) to `POST /my-picks-v2` (`MP-1`) before capturing `snapshot`, and do not return raw `snapshot` in the `POST` response.
-   - In `MP-4` ([`src/freemium/apply/my-picks.ts:86–94`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/apply/my-picks.ts#L86-L94)), allow a free user to view an item whose live peer is locked or absent **only** when the item carries a server-captured `snapshot` (`is_snapshot: true` or `item.snapshot != null`), and add a negative security test in `V-INT-3` verifying that a free user cannot unlock a locked pick via `POST /my-picks-v2`.
-2. **Reconcile `R6` / `§8.3` Generator Math with `producer-record.schema.ts` §9.1 Invariants (`§4.4 R6`, `§8.3`, `§10.1 V-UNIT-5`) [HIGH]:**
-   - Round `probability` and `entry_decimal_odds` with `round4`, default missing `bookmaker.name` and `stake_units <= 0` on legacy seed docs, skip null-id placeholders (`100076740`), key the store by `${region}:${pick_id}` (with fallback to `pick_id`), and either normalize `american_odds = decimalToAmerican(round4(d))` in the mock/seed inputs or pass `checkEntryAmericanFormula: false` for legacy/mock records.
-   - In `§8.3` Steps 7 & 8, assign non-cancelled observation scenarios (`live`, `narrowing`, `closed`, `moved`, `no_observation`) to started/settled/void picks and set `is_closing: gameStarted && observed_at !== null`.
-3. **Fix `legacy-selection.ts` (`§5.2`, `Appendix A.5`) for Format A Spreads, `player_yes`, and H2H Fallback [HIGH]:**
-   - Parse Format A spread slot and signed line from `pick.code` first (matching [`top-pick.ts:170`](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L170)) and use `Math.abs(Number(position))` when applying sign from `FAV_`/`UD_`.
-   - Map Format A `player_yes` (`bet_line: "yes"`, `position: 0.5` on `2002_player_TD_au`/`us`) to `market: "player_prop"`, `selection: "over"`, `line: 0.5`.
-   - Use [`resolveBookmakerBetLine`](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L115-L122) for Format A H2H so `bet_line: null` (`37_H2H`) falls back to `pick.code`.
-4. **Fix `injectCancelledPicks` Top-Level Redaction and Player Fields (`§5.3`, `Appendix A.3`) [HIGH]:**
-   - Copy `prediction_type`, `player_full_name: record.player_name`, `stat: record.stat`, `stat_name: record.stat_name`, and `team_full_name: record.team_name` onto injected rows, and run [`nullifyLockedPickFields`](file:///mnt/devel/xosports/github/mobile-server/src/freemium/resolve/locked-pick-response.ts#L206) when `locked === true`.
-5. **Complete the `mobile-app` Table (`§7.1`) and My Picks Settlement (`§6 MP-5`) [HIGH]:**
-   - Pass `edge_pick: pick.edge_pick` into `bookmakerOddsPick` in `EdgePicksCard.tsx:92–100` (`FE-3`).
-   - Disable Add-to-Slip on `Postponed`, `Completed`, `Cancelled`, `Abandoned`, and `In Progress` games even when `edge_pick` is `null` or `edge_pick.status === "open"` (`FE-6`).
-   - Add `FE-9` to wire `outcome` on `EdgePicksCard.tsx:281` and support `"push"` in [`predictionOutcome.ts`](file:///mnt/devel/xosports/github/mobile-app/app/utils/predictionOutcome.ts) / [`PredictionOutcomeIndicator.tsx`](file:///mnt/devel/xosports/github/mobile-app/app/components/common/PredictionOutcomeIndicator.tsx).
-   - Add `FE-10` to update [`MyPicksItem.tsx:101`](file:///mnt/devel/xosports/github/mobile-app/app/components/MyPicks/MyPicksItem.tsx#L101) and [`PickGroupCard.tsx:57`](file:///mnt/devel/xosports/github/mobile-app/app/screens/MyPicksScreen/components/PickGroupCard.tsx#L57) so `outcome === 2` (`push`/`void`) renders neutrally instead of as a green win tick, and target [`src/lib/my-pick/my-pick.ts:162–213`](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/my-pick.ts#L162-L213) (`buildMyPickSlipResponse`) in `MP-5(c)`.
+#### Evidence & Failure Mechanism
+In `§4.3` (line 167 & 203) and `Appendix A.1` (line 715), when `era === "legacy"` (i.e., `EDGE_PICK_RECORD_SOURCE=none` in P1, or a pick has no matching v4 record), `buildBlock` sets `edge_pick.selection = null`.
 
+This causes **three contradictions** across the plan:
+1. **Contradicts `§4.3` line 204 (`EdgePickBlockSchema` group visibility rule):**
+   - Line 204 states: *"Groups: each hidden group's fields null; each visible group's values set, except legacy `entry.line` and `entry.source`, which may be null."*
+   - In [v4.schema.ts](file:///mnt/devel/xosports/github/mobile-server/src/contracts/edge-picks/v4.schema.ts#L502-L505), `EdgePickBlockSchema` specifically had to add `if (val.era === "v4" && val.selection === null)` to avoid rejecting legacy blocks with `selection: null`.
+2. **Contradicts `V-UNIT-3` (`§9` line 536):**
+   - `V-UNIT-3` requires:
+     > *"For every pick produced across the 9 seed files, `buildBlock(pick, undefined, ctx)` (legacy path) and `buildBlock(pick, mockRecord, ctx)` (v4 path) both validate against `EdgePickBlockSchema`, and **the block's side and line agree with the pick's `pickDescription`**."*
+   - On the legacy path (`buildBlock(pick, undefined, ctx)`), if `selection` is `null`, the block has **no `side`** (`block.selection` is `null`), making `V-UNIT-3`'s assertion impossible on the legacy path!
+3. **Breaks `FE-6` moneyline exclusivity in P1 for Format A `H2H` picks:**
+   - `FE-6` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L406)) states:
+     > *"Pass `bet_type` (or `edge_pick.selection.market`) into `SelectedPick` on `EdgePicksCard` so the moneyline exclusivity check in `GamePick.tsx:68-79` (`isH2hPick`, replacing opposite-team H2H pick in the slip) fires for EdgePicksCard just like TopPickCard — keyed on `edge_pick.selection.market === 'moneyline'` with fallback `isH2hPick`."*
+   - In P1 (`tst` and `prod` have `EDGE_PICK_RECORD_SOURCE=none`), every pick has `era: "legacy"`. If `edge_pick.selection` is `null`, `edge_pick.selection?.market` is `undefined`. And in `GamePick.tsx:68-79` ([GamePick.tsx](file:///mnt/devel/xosports/github/mobile-app/app/screens/PredictionsScreen/PredictionsDetailScreen/_components/GamePick.tsx#L68-L79)), `isH2hPick(pick)` checks `pick.bet_type?.toUpperCase() === "H2H" || pick.bet_type?.toLowerCase() === "moneyline" || pick.id.startsWith("h2h:")`. So `FE-6` **must** pass both `bet_type: pick.edge_pick?.selection?.market ?? pick.bet_type` into `SelectedPick` on `EdgePicksCard.tsx:148-161` AND populate `selection` on `era: "legacy"` blocks using `legacy-selection.ts`!
+
+Notice that `Appendix A.1` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L710)) **already calls `legacy-selection.ts`** on the legacy path to compute `entry.line`! Populate `selection: legacySelection(pick, schedule)` (when non-null) on the legacy path in `Appendix A.1` as well.
+
+#### Concrete Fix for `option-b-plan.md`
+1. **In `Appendix A.1` (line 715) and `§4.3` (lines 167, 203–204):**
+   - On the legacy path (`era: "legacy"`), set `selection: legacySelection(pick, schedule)` (which returns `{ market, side, line, stat_code }` or `null` only if unparseable, and gets nulled by `attachEdgePicks` when `"selection"` is in `access.hidden`).
+   - This makes `V-UNIT-3` pass on both legacy and v4 paths and gives the app `edge_pick.selection.market` even in P1 when `EDGE_PICK_RECORD_SOURCE=none`.
+2. **In `§7.1` `FE-6` (line 406):**
+   - Explicitly specify that `EdgePicksCard.tsx:148-161` adds `bet_type: edgePick?.selection?.market ?? pick.bet_type` to the `SelectedPick` object passed to `addPick`, and `isH2hPick` in `GamePick.tsx:68-79` matches `"moneyline"` as well as `"H2H"`.
+
+---
+
+### `R2-06` [MEDIUM-HIGH] `§8.3` Step 7 Scenario Fallthrough Can Drop `line_moved` (`V-MOCK-2`), and Date Bucketing Needs an Explicit `schedule.game_date` Rule
+
+#### Where in `option-b-plan.md`
+- `§8.3` step 7 ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L459-L473))
+- `§9` `V-MOCK-2` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L540))
+
+#### Evidence & Failure Mechanism
+1. **`line_moved` scenario can be skipped by fallthrough:**
+   - `§8.3` step 7 ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L459)) states:
+     > *"Within a day, open picks (`settlement_status === "pending"` and game not started) are sorted by `pick_id`: the first nine take the nine scenarios in table order (covering every status × edge_state × signal combination on any day with ≥ 9 open picks), and the rest select via `rng(pickId, "s")` with the weights below. If a pick isn't eligible for its scenario (table below), it takes the next scenario it is eligible for."*
+   - Look at index `3` in the 9-scenario table: `line_moved` (`Requires: line !== null`).
+   - All subsequent scenarios in indices `4..8` (`suspended`, `withdrawn`, `cancelled`, `stale`, `mean_rev`) have `Requires: any`.
+   - Therefore, if the pick at sorted index `3` happens to be a `moneyline` pick (`line === null`), it is ineligible for `line_moved` and falls through to `suspended` (`Requires: any`). Meanwhile, the pick at index `4` (even if it has `line !== null`) is assigned scenario `4` (`suspended`), NOT `line_moved`!
+   - Result: if the remaining open picks on that day (weighted at only `8%` for `line_moved`) don't randomly roll `line_moved`, that day has **0 `line_moved` picks**, failing `V-MOCK-2` (*"Every day in the 2-week NBA window with ≥ 9 open picks exercises all 9 scenarios"*)!
+2. **Date bucketing key in step 7 (`schedule.game_date` vs UTC date of `game_datetime`):**
+   - For US NBA games tipping off at 7:30 PM – 10:30 PM ET (`23:30Z` – `03:30Z` next day), `schedule.game_date` is the US slate date (e.g., `"2026-03-19"`), whereas `game_datetime.slice(0, 10)` in UTC splits a single US slate across two UTC dates.
+   - In `nba_mock_data_2weeks.json`, grouping by `schedule.game_date` gives 15 slate dates (`2026-03-19` through `2026-04-02`), where every future slate date with games (`2026-03-26` through `2026-04-02`, 8 days) has between 30 and 100 open picks per region (`≥ 9` open picks on every future day).
+
+#### Concrete Fix for `option-b-plan.md`
+In `§8.3` step 7 (line 459):
+- Specify that "within a day (grouped by `(region, schedule.game_date ?? game_datetime.slice(0, 10))`)" open picks are sorted by `pick_id`.
+- Instead of falling through when the pick at index `3` (`line_moved`) has `entry_line === null`, **swap** it with the first open pick at index `j > 3` (or `j < 3` not requiring `line !== null`) that has `entry_line !== null`. Since every NBA game has spread, total, and player over/under picks (`entry_line !== null`), a swap is guaranteed to succeed on any day with ≥ 9 open picks, guaranteeing 100% coverage of all 9 scenarios (`V-MOCK-2`).
+
+---
+
+### `R2-07` [MEDIUM-HIGH] My Picks `MP-5(b)` & `FE-9` Reference Non-Existent Files in `mobile-app` and Miss Live-Resolved `pickOutcome`, Format A/B `line`, and `loadByGameSks` in `mobile-server`
+
+#### Where in `option-b-plan.md`
+- `§5.4` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L276))
+- `§6.4` `MP-1` & `MP-5(b)` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L384-L388))
+- `§7.1` `FE-9` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L409))
+
+#### Evidence & Failure Mechanism
+1. **Frontend `FE-9` references two files that do not exist in `mobile-app`:**
+   - `§7.1` `FE-9` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L409)) lists:
+     - `app/services/myPicks/myPicks.adapter.ts:69-89`
+     - `app/components/PredictionStatus.tsx:10`
+   - Neither file exists on `main` (`137f2f61`) or `origin/feat/XTP-125-Edge-Picks-Redesign-Oct26` (`88de3461`).
+   - In the actual `mobile-app` codebase:
+     - `GET /my-picks-v2` is typed in [app/services/my-picks-v2/type.ts](file:///mnt/devel/xosports/github/mobile-app/app/services/my-picks-v2/type.ts#L4-L22) (`export interface MyPickV2Item { ... outcome?: number | null; ... }`) and fetched directly via [app/services/myPicks/myPicks.service.ts](file:///mnt/devel/xosports/github/mobile-app/app/services/myPicks/myPicks.service.ts#L60-L65) and [app/services/myPicks/myPicks.hook.ts](file:///mnt/devel/xosports/github/mobile-app/app/services/myPicks/myPicks.hook.ts#L48-L65) with no adapter file.
+     - Single-pick outcome icons on the My Picks screen are rendered in [app/components/MyPicks/MyPicksItem.tsx](file:///mnt/devel/xosports/github/mobile-app/app/components/MyPicks/MyPicksItem.tsx#L98-L105):
+       ```tsx
+       {type === 'completed' && (
+         <View style={styles.statusContainer}>
+           <AppIcon
+             name={pick.outcome ? 'tick' : 'close_red'}
+             size={pick.outcome ? 20 : 12}
+           />
+         </View>
+       )}
+       ```
+       Note the existing bug: when `pick.outcome === 2` (push/void), `Boolean(2)` is `true`, so `MyPicksItem.tsx` renders a **green `'tick'`**!
+     - Group/multibet outcome status on the My Picks screen is computed in [app/screens/MyPicksScreen/components/PickGroupCard.tsx](file:///mnt/devel/xosports/github/mobile-app/app/screens/MyPicksScreen/components/PickGroupCard.tsx#L56-L60) and [L84-L97](file:///mnt/devel/xosports/github/mobile-app/app/screens/MyPicksScreen/components/PickGroupCard.tsx#L84-L97):
+       ```tsx
+       const status = useMemo(() => {
+         if (type === 'upcoming') return undefined;
+         return group.items?.some((p) => !p.outcome) ? false : true;
+       }, [group.items, type]);
+       ```
+       Which also treats `outcome: 2` as won (`!2 === false`)!
+     - Meanwhile, on the Top Picks screen (`TopPickCard` / `EdgePicksCard`), outcome pills are rendered by [app/utils/predictionOutcome.ts](file:///mnt/devel/xosports/github/mobile-app/app/utils/predictionOutcome.ts#L1-L34) (`export type PredictionOutcome = "correct" | "incorrect" | "void"`) and [app/components/common/PredictionOutcomeIndicator.tsx](file:///mnt/devel/xosports/github/mobile-app/app/components/common/PredictionOutcomeIndicator.tsx#L12-L22).
+
+2. **Backend `MP-5(b)` misses three concrete details in `resolve-my-picks-list.ts`:**
+   - **Live-resolved picks have `pickOutcome`, not `outcome`:** In [resolve-my-picks-list.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/resolve-my-picks-list.ts#L52-L58), `lookupResolvedPick` returns a live pick from `availableIndex` (`picksForGame`) whenever the pick is still in the current Cosmos top-picks doc; it only falls back to `hydratePickFromSnapshot` when the pick has disappeared from the live doc. A live pick from `picksForGame` has **`pickOutcome: 0 | 1 | 2 | null`** (set by `mapOutcomeToResult` in [top-pick.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/top-picks/top-pick.ts#L55-L67) or `mapSettlementOutcome` in [picks.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/match/canonical/picks.ts#L313-L329)), whereas `hydratePickFromSnapshot` ([snapshot.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/snapshot.ts#L220)) sets **`outcome: 0 | 1 | 2 | null`**, and `hydrateGameH2hMyPickItem` ([resolve-my-picks-list.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/resolve-my-picks-list.ts#L28-L50)) sets **neither** (relying on the client or `schedule.outcome.result`)!
+     Therefore, `MP-5(b)` in `resolve-my-picks-list.ts` must read `const rawCode = resolvedPick.outcome ?? resolvedPick.pickOutcome`, and ensure `outcome: rawCode` is populated on the returned `MyPickV2Item` for both live-resolved and snapshot-hydrated items.
+   - **Whole-number `line` check for `push` vs `void` on Format A/B picks:** `MP-5(b)` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L388)) distinguishes `"push"` from `"void"` on code `2` *"when the market has a whole-number line"*. However, on Format A and Format B picks, `pick.line` is `undefined` (the line is in `bookmaker.bet_line` or `pick.code`), so `capturePickSnapshot` ([snapshot.ts](file:///mnt/devel/xosports/github/mobile-server/src/lib/my-pick/snapshot.ts#L129)) stores `line: null`. `MP-1` (`capturePickSnapshot`) and `MP-5(b)` should fall back to `legacySelection(pick, schedule)?.line` when `pick.line == null`.
+   - **`RecordSource` needs `loadByGameSks(gameSks, region)`:** `§5.4` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L276)) defines `RecordSource` with only `load({ date, tzOffset, region, sport }): Promise<Map<string, ProducerRecord>>`. While `matches-top-predictions-v3` and `POST /my-picks-v2` (`createMyPickV3` has the game schedule's date/sport) can query by date or `game_sk`, `GET /my-picks-v2` (`resolve-my-picks-list.ts`) and `reconcile-snapshots.ts` (`BE-12`) load user slips spanning **arbitrary historical `game_sk`s across multiple dates and sports**. Adding `loadByGameSks(gameSks: number[], region: "au" | "us"): Promise<Map<string, ProducerRecord>>` to `RecordSource` makes `MP-5(b)` and `BE-12` clean and O(1) on both `mock-source.ts` and `cosmos-source.ts`.
+
+#### Concrete Fix for `option-b-plan.md`
+1. **In `§5.4` (line 276):** Add `loadByGameSks(gameSks: number[], region: "au" | "us"): Promise<Map<string, ProducerRecord>>` to the `RecordSource` interface.
+2. **In `§6.4` `MP-1` & `MP-5(b)` (lines 384, 388):**
+   - In `MP-1` (`capturePickSnapshot`), populate `snapshot.line` via `pick.line ?? legacySelection(pick, schedule)?.line ?? null`.
+   - In `MP-5(b)` (`resolve-my-picks-list.ts`), normalize `outcome: resolvedPick.outcome ?? resolvedPick.pickOutcome ?? null` on every returned item, and derive `result: "won" | "lost" | "push" | "void" | null` from the v4 record's `settlement_result` (via `recordSource.loadByGameSks`) or from `outcome` + `(resolvedPick.line ?? legacySelection(resolvedPick, schedule)?.line)`.
+3. **In `§7.1` `FE-9` (line 409):** Replace the non-existent `myPicks.adapter.ts` and `PredictionStatus.tsx` paths with the actual files:
+   - [app/services/my-picks-v2/type.ts](file:///mnt/devel/xosports/github/mobile-app/app/services/my-picks-v2/type.ts#L4-L22): add `result?: 'won' | 'lost' | 'push' | 'void' | null;` to `MyPickV2Item`.
+   - [app/components/MyPicks/MyPicksItem.tsx](file:///mnt/devel/xosports/github/mobile-app/app/components/MyPicks/MyPicksItem.tsx#L98-L105) & [app/screens/MyPicksScreen/components/PickGroupCard.tsx](file:///mnt/devel/xosports/github/mobile-app/app/screens/MyPicksScreen/components/PickGroupCard.tsx#L56-L60): render `"won"` (`outcome === 1`), `"lost"` (`outcome === 0`), and `"push" | "void"` (`outcome === 2`) distinctly instead of `pick.outcome ? 'tick' : 'close_red'`.
+
+---
+
+### `R2-08` [MEDIUM] `EdgePicksCard.tsx` (`88de3461`) Hardcodes `outcome={null}`, Hides `<BookmakerOddsChip>` on Locked Picks, and Gates `<ProbabilityBar>` to NBA Only
+
+#### Where in `option-b-plan.md`
+- `§7.1` `FE-3` & `FE-4` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L403-L404))
+- `§7.2` ([option-b-plan.md](file:///mnt/devel/xosports/xo-scratchpad/edgepicks-redesign/staging/option-b-plan.md#L413-L433))
+
+#### Evidence & Failure Mechanism
+Inspecting [EdgePicksCard.tsx](file:///mnt/devel/xosports/github/mobile-app/app/screens/TopPicksScreen/_components/EdgePicksCard.tsx) and [BookmakerOddsChip.tsx](file:///mnt/devel/xosports/github/mobile-app/app/screens/TopPicksScreen/_components/BookmakerOddsChip.tsx) on `origin/feat/XTP-125-Edge-Picks-Redesign-Oct26` (`88de3461`) reveals three concrete UI gaps that `FE-3` and `FE-4` should explicitly call out:
+
+1. **`CardOutcomeFooterRow` in `EdgePicksCard.tsx:283` hardcodes `outcome={null}`:**
+   - At `EdgePicksCard.tsx:282-290` (`88de3461`):
+     ```tsx
+     <CardOutcomeFooterRow
+       outcome={null}
+       matchStatus={matchStatus}
+       ...
+     />
+     ```
+     Unlike `TopPickCard.tsx:231` (which passes `outcome={mapPickOutcome(pick.pickOutcome)}`), `EdgePicksCard.tsx` passes `outcome={null}`, so completed picks never display a Won / Lost / Push / Void indicator in the card footer!
+   - Furthermore, [app/utils/predictionOutcome.ts](file:///mnt/devel/xosports/github/mobile-app/app/utils/predictionOutcome.ts#L1-L21) currently defines `export type PredictionOutcome = "correct" | "incorrect" | "void"` and [PredictionOutcomeIndicator.tsx](file:///mnt/devel/xosports/github/mobile-app/app/components/common/PredictionOutcomeIndicator.tsx#L12-L22) only renders `"correct"`, `"incorrect"`, and `"void"`. To satisfy `§7.2` (*"Settled (`status = settled`): result pill (`Won` / `Lost` / `Push`); Void (`status = void`): muted `Void` pill"*), `predictionOutcome.ts` and `PredictionOutcomeIndicator.tsx` need `"push"` added (`mapEdgePickResult(edgePick?.result) ?? mapPickOutcome(pick.pickOutcome)`).
+2. **`BookmakerOddsChip` disappears completely on locked picks instead of rendering blurred odds with the unredacted bookmaker label:**
+   - In `bookmakerOdds.ts:70-75` (`88de3461`), `bookmakerOddsView` returns `null` whenever `original == null` (`entry.odds` and `bookmaker`/`american_odds`/`decimal_odds` are all nulled by the BFF when `"odds"` is in `access.hidden`).
+   - In `BookmakerOddsChip.tsx:24-25` (`88de3461`), `const view = bookmakerOddsView(pick, oddsFormat); if (!view) return null;` — so the entire `<BookmakerOddsChip>` component disappears on locked picks (`locked === true`), even though `BookmakerOddsChip.tsx:66-76` has `<CensoredValue blurred={blurred} placeholder="-110" compact>` ready to render blurred odds and `§4.3` specifically keeps `edge_pick.entry.source` (`{ kind, code, name }`) **unredacted** on locked picks!
+3. **`ProbabilityBar` in `EdgePicksCard.tsx:271` is gated to `LEAGUES.NBA` and ignores `edge_pick.probability`:**
+   - At `EdgePicksCard.tsx:271-278` (`88de3461`), `<ProbabilityBar>` is wrapped in `{leagueName.toLowerCase() === LEAGUES.NBA && (...)}` and reads `pick.probability ?? pick.xoProbability` instead of `edgePick?.probability ?? pick.probability ?? pick.xoProbability`. Since `edge_pick.probability` is populated for all 9 leagues (EPL, MLB, NFL, NBA, AFL, NRL, CPL, Squash, TD), gating the probability bar to NBA hides it on the other 8 sports.
+
+#### Concrete Fix for `option-b-plan.md`
+Update `§7.1` `FE-3` and `FE-4` (lines 403–404) to explicitly include:
+- **`FE-3` (`bookmakerOdds.ts` & `BookmakerOddsChip.tsx`):** When `pick.locked || pick.edge_pick?.access.locked` is true and odds are redacted (`original == null`), `bookmakerOddsView` still returns `{ sourceLabel: resolveBookmakerSourceLabel(pick), original: "-110", current: null, arrow: null }` so `BookmakerOddsChip` renders the unredacted bookmaker label alongside `<CensoredValue blurred placeholder="-110" compact>`.
+- **`FE-4` (`EdgePicksCard.tsx`, `predictionOutcome.ts`, `PredictionOutcomeIndicator.tsx`):** Wire `outcome={mapEdgePickOutcome(edgePick?.result, pick.pickOutcome)}` into `<CardOutcomeFooterRow>` at `EdgePicksCard.tsx:283` (supporting `"correct" | "incorrect" | "push" | "void"`), and read `edgePick?.probability ?? pick.probability ?? pick.xoProbability` in `<ProbabilityBar>` across all sports.
+
+---
+
+## 4. Summary Verification Matrix & Readiness Verdict
+
+| Area | Round 1 Status | Round 2 Status | Remaining Action Before Coding |
+| :--- | :---: | :---: | :--- |
+| **API Version Gating (`api_version=v7`)** | Blocked (`F-02`) | **Ready** | None — `v7` gate is clean across BFF and app. |
+| **My Picks Security & Snapshot Contract (`MP-1`..`MP-4`, `FE-6`, `FE-7`)** | Blocked (`F-01`, `F-09`, `F-10`) | **Ready (with `R2-05` & `R2-07` tweaks)** | Add `bet_type` to `SelectedPick` on `EdgePicksCard` (`R2-05`); fix file paths in `FE-9` and read `pickOutcome` in `MP-5(b)` (`R2-07`). |
+| **`EdgePickBlockSchema` & Freemium Redaction (`BE-2`, `BE-6`)** | Blocked (`F-07`) | **Needs `R2-01` & `R2-05` fixes** | Align `Appendix A.4` / `§8.3` step 6 with `shouldSkipFreemiumForGameStatus` (`R2-01`); populate `selection` on `era: "legacy"` (`R2-05`). |
+| **P4 Cancelled-Pick Injection (`BE-11`, `Appendix A.3`)** | Missing (`F-07`, `F-12`) | **Needs `R2-04` fix** | Swap `NEW ②` and `NEW ③` in `§5.1` so injected picks run through `attachEdgePicks` and update `body.count` (`R2-04`). |
+| **Legacy Selection Parser (`BE-5`, `Appendix A.5`)** | Blocked (`F-06`) | **Needs `R2-03` fix** | Read `pick.bet_type ?? pick.type`, parse `stat_code` from `pick.id` when `pick.code` is overwritten/stripped, and handle `h2h:` picks (`R2-03`). |
+| **Mock Generator & Seed Coverage (`§8.3`, `V-MOCK-1`..`3`)** | Blocked (`F-03`..`F-05`) | **Needs `R2-02` & `R2-06` fixes** | Move `pick_id` regex check under `checkIdFormula` (`R2-02`), handle the 3 seed quirks (`R2-02`), and swap `line_moved` at index 3 when `line === null` (`R2-06`). |
+| **`EdgePicksCard` & `BookmakerOddsChip` UI (`FE-3`, `FE-4`)** | Blocked (`F-08`) | **Needs `R2-08` fix** | Wire `outcome` into `CardOutcomeFooterRow`, keep `BookmakerOddsChip` visible when `blurred`, and ungate `ProbabilityBar` (`R2-08`). |
