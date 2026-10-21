@@ -86,3 +86,5 @@ The fifth pass does not move any substantive conclusion: the four requirement-le
 - I cannot inspect the authoring checkout's reflog; the review judges only what the shared repository can evidence and does not dispute that the authoring session may have seen a local commit. The problem is the sentence as committed, not the author's account.
 - No contract or consumer file changed in this pass, so the earlier substantive verifications stand; this review re-ran the validator and re-checked the changed assessment text and probe definitions only.
 - The strength classifications are my reading of the contract's may/should/must language; the pass's classification matches them except where noted.
+
+**Postscript (same day):** all six recommended edits were applied to `conf-schema-contracts-assessment.md` in the follow-up commit: the §6 provenance claim and the feedback-review postscript are scoped to the authoring session's account, the 19/22 counts are reconciled in §3.1 and Appendix A, §3.6 defers the `player_sk` minimum to item 14, the Method row drops "single-rule", and §3.1 notes the two non-gap items.

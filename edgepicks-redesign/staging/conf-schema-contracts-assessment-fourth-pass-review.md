@@ -102,3 +102,5 @@ The committed script contains no self-test for the false-PASS class: it has the 
 - The authoring checkout's reflog cannot be inspected from this machine; the review therefore judges only what the shared repository can evidence. It does not dispute that the authoring session saw a local commit — only that the sentence as committed is unsupported and contradicted by this repo's history.
 - No contract or consumer files were changed by the fourth pass, so the earlier substantive verifications stand; this review re-ran only the validation and checked the cited lines.
 - The semantic classification of probes (hard/implied/soft) is my reading of the contract text, not a claim about the author's intent; the fix is to label them, not to remove them.
+
+**Postscript (same day):** the provenance fix recommended in §2.1 was applied after the fifth-pass review; the claim is now scoped to the authoring session's account and states that this repository cannot verify it (see the assessment's sixth-pass revision note).
