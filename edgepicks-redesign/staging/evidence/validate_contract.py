@@ -10,7 +10,15 @@ Checks (all self-contained from the markdown):
   E. §10 examples satisfy the arithmetic/invariant rules (entry_edge, american odds,
      break-even, current_edge, edge_status).
   F. Prose rules the JSON Schema does NOT enforce (probe mutations that should be
-     invalid by the prose but pass the schema).
+     invalid by the prose but pass the schema). Each probe changes only the field(s)
+     under test and is judged by WHERE the schema rejects it; a rejection on an
+     unrelated field is reported as FAIL (broken probe), never as PASS.
+
+Revision 2026-10-21 (fourth pass): section F rewritten. The first capture reported
+two false PASSes ("negative game_sk" was rejected only because its mutated pick_id
+broke the id regex; "player projection unit nonsense" was rejected only because the
+spread example's negative current_line broke the positive-line rule). Probes for
+§3.5 items 13-15 (timestamps, positive keys, projection_unit, current_edge) added.
 """
 import json
 import re
@@ -301,42 +309,96 @@ for n, ex in enumerate(examples, 1):
            "; ".join(problems))
 
 # ---------- F. prose rules not enforced by schema ----------
-def mutations():
-    base = examples[2]  # live game pick
-    out = {}
+# Each probe starts from a schema-valid §10 example and changes ONLY the field(s)
+# under test, so a rejection can be attributed to the rule being probed.
+# Verdicts:
+#   PASS  the schema rejects the record AND at least one error is on a field under test
+#   GAP   the schema accepts the record (the prose rule is not enforced by the schema)
+#   FAIL  the probe is broken: the record is rejected only for an unrelated reason,
+#         so it says nothing about the rule (this is what produced two false PASSes
+#         in the first capture of this script).
+# Timestamp probes are run twice: with the default validator (format is an
+# annotation in Draft 2020-12) and with FormatChecker(), whose `date-time` check
+# is silently skipped unless the optional `rfc3339-validator` package is installed.
+from jsonschema import FormatChecker
 
-    def m(name, **kw):
-        r = json.loads(json.dumps(base))
+v_fmt = Draft202012Validator(schema, format_checker=FormatChecker())
+try:
+    import rfc3339_validator  # noqa: F401
+    _rfc = "installed"
+except ImportError:
+    _rfc = "NOT installed"
+
+
+def _copy(ex):
+    return json.loads(json.dumps(ex))
+
+
+def probes():
+    ex_player_open = examples[0]   # §10.1 nba player prop, no observation
+    ex_game_live = examples[2]     # §10.3 nba spread, live observation, unchanged line
+    ex_player_proj = examples[4]   # §10.5 settled player prop with a projection
+    out = []
+
+    def probe(name, base, fields, **kw):
+        r = _copy(base)
         r.update(kw)
-        out[name] = r
+        out.append((name, r, set(fields)))
 
-    m("sport/market mismatch: nba + draw", market="draw", side="draw", team_sk=None,
-      pick_id="40021717862|draw_draw|draw|-4.5|main|full|us")  # also bad line, so neutralise below
-    r = out["sport/market mismatch: nba + draw"]
-    r["line"] = None
-    r["current_line"] = None
-    r["pick_id"] = "40021717862|draw_draw|draw|null|main|full|us"
-    m("negative game_sk", game_sk=-5, pick_id="-5|spread_t1|t1|-4.5|main|full|us")
-    m("zero/negative team_sk", team_sk=-2, pick_id="40021717862|spread_t1|t1|-4.5|main|full|us")
-    m("current_edge non-null with moved line", current_line=-5.5, current_edge=0.05,
-      edge_status="closed", pick_id="40021717862|spread_t1|t1|-4.5|main|full|us")
-    m("current_edge wrong arithmetic", current_edge=0.5)
-    m("is_closing true while still open", is_closing=True)
-    m("settled with is_closing false", pick_status="settled", outcome="won", is_closing=False)
-    m("cancelled without status_reason", pick_status="cancelled", status_reason=None)
-    m("edge_basis ev with prob-style entry_edge", edge_basis="ev", entry_edge=0.05)
-    m("player projection unit nonsense", pick_kind="player", market="player_prop", side="over",
-      line=24.5, team_sk=None, player_sk=400000000434, stat_code="pts",
-      pick_id="40021717862|400000000434|pts|player_over|24.5|main|full|us")
+    r = _copy(ex_game_live)
+    r.update(market="draw", side="draw", team_sk=None, line=None, current_line=None,
+             current_edge=None, edge_status="closed",
+             pick_id="40021717862|draw_draw|draw|null|main|full|us")
+    out.append(("sport/market mismatch: nba + draw", r, {"sport", "market"}))
+    probe("negative game_sk", ex_game_live, ["game_sk"], game_sk=-5)
+    probe("zero/negative team_sk", ex_game_live, ["team_sk"], team_sk=-2)
+    probe("zero player_sk", ex_player_open, ["player_sk"], player_sk=0)
+    probe("empty projection_unit", ex_player_proj, ["projection_unit"], projection_unit="")
+    probe("projection_value without projection_unit", ex_player_proj, ["projection_unit"],
+          projection_unit=None)
+    probe("pick_date_time not a timestamp", ex_game_live, ["pick_date_time"],
+          pick_date_time="yesterday")
+    probe("pick_date_time with offset, no ms, no Z", ex_game_live, ["pick_date_time"],
+          pick_date_time="2026-10-22T18:05:12+11:00")
+    probe("current_edge null on unchanged line", ex_game_live, ["current_edge"], current_edge=None)
+    probe("current_edge non-null with moved line", ex_game_live, ["current_edge", "current_line"],
+          current_line=-5.5, current_edge=0.05, edge_status="closed")
+    probe("current_edge wrong arithmetic", ex_game_live, ["current_edge"], current_edge=0.5)
+    probe("is_closing true while still open", ex_game_live, ["is_closing"], is_closing=True)
+    probe("settled with is_closing false", ex_game_live, ["is_closing", "pick_status"],
+          pick_status="settled", outcome="won", is_closing=False)
+    probe("cancelled without status_reason", ex_game_live, ["status_reason"],
+          pick_status="cancelled", status_reason=None)
+    probe("edge_basis ev with prob-style entry_edge", ex_game_live, ["entry_edge", "edge_basis"],
+          edge_basis="ev", entry_edge=0.05)
     return out
 
 
-for name, rec in mutations().items():
-    errs = list(v.iter_errors(rec))
-    if errs:
-        report("F", f"schema catches: {name}", "PASS")
+def _fields(err):
+    if err.path:
+        return {str(err.path[0])}
+    # required/additionalProperties errors carry no path; fall back to the message
+    return {w.strip("'") for w in re.findall(r"'([a-z_]+)'", err.message)}
+
+
+def judge(validator, name, rec, fields, suffix=""):
+    errs = list(validator.iter_errors(rec))
+    label = name + suffix
+    if not errs:
+        report("F", f"schema does NOT catch: {label}", "GAP")
+        return
+    hit = set().union(*(_fields(e) for e in errs))
+    if hit & fields:
+        report("F", f"schema catches: {label}", "PASS", f"error on {sorted(hit & fields)}")
     else:
-        report("F", f"schema does NOT catch: {name}", "GAP")
+        report("F", f"probe broken (rejected for an unrelated reason): {label}", "FAIL",
+               f"errors on {sorted(hit)}, expected one of {sorted(fields)}")
+
+
+for name, rec, fields in probes():
+    judge(v, name, rec, fields)
+    if "pick_date_time" in fields:
+        judge(v_fmt, name, rec, fields, suffix=f" [FormatChecker; rfc3339-validator {_rfc}]")
 
 # check pick_status values referenced in prose all exist in schema enum
 prose_status = ["open", "awaiting_result", "cancelled", "settled", "void", "withdrawn"]

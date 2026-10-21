@@ -36,16 +36,23 @@
 [PASS] E example 4 arithmetic/status invariants
 [PASS] E example 5 arithmetic/status invariants
 [GAP] F schema does NOT catch: sport/market mismatch: nba + draw
-[PASS] F schema catches: negative game_sk
+[GAP] F schema does NOT catch: negative game_sk
 [GAP] F schema does NOT catch: zero/negative team_sk
+[GAP] F schema does NOT catch: zero player_sk
+[GAP] F schema does NOT catch: empty projection_unit
+[PASS] F schema catches: projection_value without projection_unit :: error on ['projection_unit']
+[GAP] F schema does NOT catch: pick_date_time not a timestamp
+[GAP] F schema does NOT catch: pick_date_time not a timestamp [FormatChecker; rfc3339-validator NOT installed]
+[GAP] F schema does NOT catch: pick_date_time with offset, no ms, no Z
+[GAP] F schema does NOT catch: pick_date_time with offset, no ms, no Z [FormatChecker; rfc3339-validator NOT installed]
+[GAP] F schema does NOT catch: current_edge null on unchanged line
 [GAP] F schema does NOT catch: current_edge non-null with moved line
 [GAP] F schema does NOT catch: current_edge wrong arithmetic
 [GAP] F schema does NOT catch: is_closing true while still open
 [GAP] F schema does NOT catch: settled with is_closing false
 [GAP] F schema does NOT catch: cancelled without status_reason
 [GAP] F schema does NOT catch: edge_basis ev with prob-style entry_edge
-[PASS] F schema catches: player projection unit nonsense
 [PASS] F pick_status prose == schema enum :: schema=['open', 'awaiting_result', 'cancelled', 'settled', 'void', 'withdrawn']
 [PASS] F status_reason prose table == schema enum :: schema=['probability_moved', 'market_moved', 'lineup_change', 'withdrawn', 'game_void']
 
-=== SUMMARY: 0 FAIL, 9 GAP, 39 PASS
+=== SUMMARY: 0 FAIL, 17 GAP, 38 PASS

@@ -98,3 +98,5 @@ The NBA bet-engine conclusions are unaffected: field conversion is secondary; pe
 ---
 
 **Postscript (same day):** these corrections were applied to `conf-schema-contracts-assessment.md` in the follow-up commit; see its revision note.
+
+**Second postscript (same day):** two statements above were later withdrawn or corrected. (1) Item 7's "the supporting-analyses pointer was removed" is withdrawn: the pointer was already absent from the copy the second pass edited. (2) The missing §3.5/§6/Appendix A edits were not copy drift between clones: the second-pass session wrote a snapshot taken before its later edits were applied and did not re-read the written file (see the assessment's §6 provenance note). Separately, the evidence bundle's first validation capture contained two false PASSes; it was corrected in the assessment's fourth pass.
