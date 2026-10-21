@@ -82,4 +82,4 @@ Nothing in the assessment's conclusions moves: the record carries the card's dat
 
 ---
 
-*Not applied to the assessment; recommendations above are for the file's owner to execute, since the missing edits exist only in their session copy.*
+*At the time of writing the recommendations were not applied; the fix-up was applied to the assessment the same day in the follow-up commit (see its revision note). The missing items were reconstructed from this feedback, since the original wording existed only in the author's session copy.*

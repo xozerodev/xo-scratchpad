@@ -94,3 +94,7 @@ The NBA bet-engine conclusions are unaffected: field conversion is secondary; pe
 ---
 
 *Review only; the committed assessment was not modified. The corrections above can be applied in a follow-up edit if wanted.*
+
+---
+
+**Postscript (same day):** these corrections were applied to `conf-schema-contracts-assessment.md` in the follow-up commit; see its revision note.

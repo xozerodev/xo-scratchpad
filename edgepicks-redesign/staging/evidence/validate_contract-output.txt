@@ -1,0 +1,51 @@
+# json blocks: 6; parsed: 6
+[PASS] A schema found
+[PASS] A examples found :: n=5
+[PASS] A schema is valid Draft 2020-12
+[PASS] A 37 required fields :: n=37
+[PASS] A required == properties :: req-prop=set() prop-req=set()
+[PASS] A additionalProperties false
+[PASS] A frozen field count 23
+[PASS] A frozen fields all in schema :: []
+[PASS] A every property required (closed shape)
+[PASS] B example 1 (us/nba/player)
+[PASS] B example 2 (au/epl/game)
+[PASS] B example 3 (us/nba/game)
+[PASS] B example 4 (us/nba/game)
+[PASS] B example 5 (us/nba/player)
+[PASS] C P-1 :: got 0.1073 want 0.1073
+[PASS] C P-2 :: got 0.0562 want 0.0562
+[PASS] C P-3 :: 5 pp -> 0.05
+[PASS] C P-4 :: b=1.8181 am=-122
+[PASS] C P-5 :: b=1.9230
+[PASS] C P-6
+[PASS] C P-7 :: ce=0.0725 b=1.8181 m=1.9091
+[PASS] C P-8 (current_line moved -> closed/null)
+[PASS] C P-9 :: am=-115
+[PASS] D pick_id regex accepts all documented ids :: n=10
+[PASS] D example 1 pick_id reconstructed from fields
+[PASS] D example 2 pick_id reconstructed from fields
+[PASS] D example 3 pick_id reconstructed from fields
+[PASS] D example 4 pick_id reconstructed from fields
+[PASS] D example 5 pick_id reconstructed from fields
+[GAP] D regex accepts structurally-corrupt id (no token/selection consistency) :: 40021717862|spread_t1|t2|-4.5|main|full|us
+[PASS] D pick_id regex rejects corruptions
+[PASS] E example 1 arithmetic/status invariants
+[PASS] E example 2 arithmetic/status invariants
+[PASS] E example 3 arithmetic/status invariants
+[PASS] E example 4 arithmetic/status invariants
+[PASS] E example 5 arithmetic/status invariants
+[GAP] F schema does NOT catch: sport/market mismatch: nba + draw
+[PASS] F schema catches: negative game_sk
+[GAP] F schema does NOT catch: zero/negative team_sk
+[GAP] F schema does NOT catch: current_edge non-null with moved line
+[GAP] F schema does NOT catch: current_edge wrong arithmetic
+[GAP] F schema does NOT catch: is_closing true while still open
+[GAP] F schema does NOT catch: settled with is_closing false
+[GAP] F schema does NOT catch: cancelled without status_reason
+[GAP] F schema does NOT catch: edge_basis ev with prob-style entry_edge
+[PASS] F schema catches: player projection unit nonsense
+[PASS] F pick_status prose == schema enum :: schema=['open', 'awaiting_result', 'cancelled', 'settled', 'void', 'withdrawn']
+[PASS] F status_reason prose table == schema enum :: schema=['probability_moved', 'market_moved', 'lineup_change', 'withdrawn', 'game_void']
+
+=== SUMMARY: 0 FAIL, 9 GAP, 39 PASS

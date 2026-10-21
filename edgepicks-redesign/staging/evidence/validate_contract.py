@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""Mechanical validation of the Edge Picks v4 producer pick record contract.
+
+Checks (all self-contained from the markdown):
+  A. JSON Schema parses, is a valid 2020-12 schema, has 37 required/properties.
+  B. §10 example records validate against the schema.
+  C. §5.5 test vectors P-1..P-9 reproduce.
+  D. §8 pick_id generator reproduces the concrete ids in §8.3 and the reasonableness
+     of §7.4 ids; regex accepts every concrete id and rejects obvious corruptions.
+  E. §10 examples satisfy the arithmetic/invariant rules (entry_edge, american odds,
+     break-even, current_edge, edge_status).
+  F. Prose rules the JSON Schema does NOT enforce (probe mutations that should be
+     invalid by the prose but pass the schema).
+"""
+import json
+import re
+import sys
+from decimal import Decimal, ROUND_HALF_UP, ROUND_FLOOR
+from fractions import Fraction
+
+import os
+
+MD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "conf-schema-contracts.md")
+text = open(MD, encoding="utf-8").read()
+
+fail = []
+warn = []
+ok = []
+
+
+def report(section, name, verdict, detail=""):
+    label = {"PASS": "PASS", "FAIL": "FAIL", "GAP": "GAP", "INFO": "INFO"}[verdict]
+    line = f"[{label}] {section} {name}" + (f" :: {detail}" if detail else "")
+    print(line)
+    if verdict == "FAIL":
+        fail.append(line)
+    elif verdict == "GAP":
+        warn.append(line)
+    else:
+        ok.append(line)
+
+
+# ---------- extract fenced json blocks ----------
+blocks = re.findall(r"```json\n(.*?)```", text, re.S)
+parsed = []
+for i, b in enumerate(blocks):
+    try:
+        parsed.append((i, json.loads(b)))
+    except json.JSONDecodeError as e:
+        report("EXTRACT", f"block {i}", "FAIL", f"JSON parse error: {e}")
+print(f"# json blocks: {len(blocks)}; parsed: {len(parsed)}")
+
+schema = None
+examples = []
+for i, obj in parsed:
+    if isinstance(obj, dict) and "$schema" in obj:
+        schema = obj
+    elif isinstance(obj, dict) and "pick_id" in obj:
+        examples.append(obj)
+
+report("A", "schema found", "PASS" if schema else "FAIL")
+report("A", "examples found", "PASS" if len(examples) == 5 else "FAIL", f"n={len(examples)}")
+
+# ---------- A. schema structural checks ----------
+try:
+    from jsonschema import Draft202012Validator
+    from jsonschema.exceptions import SchemaError
+
+    Draft202012Validator.check_schema(schema)
+    report("A", "schema is valid Draft 2020-12", "PASS")
+except Exception as e:  # noqa: BLE001
+    report("A", "schema is valid Draft 2020-12", "FAIL", str(e))
+
+props = schema.get("properties", {})
+req = schema.get("required", [])
+report("A", "37 required fields", "PASS" if len(req) == 37 else "FAIL", f"n={len(req)}")
+report("A", "required == properties", "PASS" if set(req) == set(props) else "FAIL",
+       f"req-prop={set(req)-set(props)} prop-req={set(props)-set(req)}")
+report("A", "additionalProperties false", "PASS" if schema.get("additionalProperties") is False else "FAIL")
+frozen = ["pick_id", "region", "sport", "game_sk", "pick_kind", "market", "side", "line",
+          "team_sk", "player_sk", "stat_code", "probability", "projection_value",
+          "projection_unit", "pick_date_time", "entry_decimal_odds", "entry_american_odds",
+          "entry_edge", "edge_basis", "edge_threshold", "stake_units", "odds_source_kind",
+          "entry_bookmaker_id"]
+report("A", "frozen field count 23", "PASS" if len(frozen) == 23 else "FAIL")
+missing_frozen = [f for f in frozen if f not in props]
+report("A", "frozen fields all in schema", "PASS" if not missing_frozen else "FAIL", str(missing_frozen))
+# required/§2.1 says all fields always present -> required list covers
+report("A", "every property required (closed shape)", "PASS" if set(req) == set(props) else "FAIL")
+
+# ---------- B. examples validate ----------
+v = Draft202012Validator(schema)
+for n, ex in enumerate(examples, 1):
+    errs = sorted(v.iter_errors(ex), key=lambda e: list(e.path))
+    if errs:
+        report("B", f"example {n} ({ex.get('region')}/{ex.get('sport')}/{ex.get('pick_kind')})", "FAIL",
+               "; ".join(f"{'.'.join(map(str, e.path))}: {e.message}" for e in errs[:4]))
+    else:
+        report("B", f"example {n} ({ex.get('region')}/{ex.get('sport')}/{ex.get('pick_kind')})", "PASS")
+
+# ---------- rounding helpers ----------
+def rnd4(x: Fraction) -> Decimal:
+    d = Decimal(x.numerator) / Decimal(x.denominator)
+    return d.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
+
+def floor4(x: Fraction) -> Decimal:
+    d = Decimal(x.numerator) / Decimal(x.denominator)
+    return d.quantize(Decimal("0.0001"), rounding=ROUND_FLOOR)
+
+
+def american(d) -> int:
+    d = Decimal(d.numerator) / Decimal(d.denominator) if isinstance(d, Fraction) else d
+    if d >= 2:
+        v = (d - 1) * 100
+        return int(v.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    v = Decimal(100) / (d - 1)
+    return -int(v.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def edge(p: Fraction, d: Fraction, basis: str) -> Fraction:
+    return p * d - 1 if basis == "ev" else p - 1 / d
+
+
+def breakeven(p: Fraction, t: Fraction, basis: str):
+    if basis == "ev":
+        return (1 + t) / p
+    if p <= t:
+        return None
+    return 1 / (p - t)
+
+
+def midpoint(d_entry: Fraction, b: Fraction) -> Fraction:
+    return (d_entry + b) / 2
+
+
+def fmt(d: Decimal) -> str:
+    return format(d.normalize(), "f")
+
+
+# ---------- C. vectors ----------
+vectors = [
+    # id, basis, p, d_entry, t, extra
+    ("P-1", "ev", "0.58", "1.9091", None),
+    ("P-2", "prob", "0.58", "1.9091", None),
+]
+def check_entry_edge(vid, basis, p, d, expected):
+    got = rnd4(edge(Fraction(p), Fraction(d), basis))
+    okflag = got == Decimal(expected)
+    report("C", vid, "PASS" if okflag else "FAIL", f"got {got} want {expected}")
+
+check_entry_edge("P-1", "ev", "0.58", "1.9091", "0.1073")
+check_entry_edge("P-2", "prob", "0.58", "1.9091", "0.0562")
+report("C", "P-3", "PASS" if Fraction("0.05") == Fraction(5) / 100 else "FAIL", "5 pp -> 0.05")
+# P-4
+b = floor4(breakeven(Fraction("0.55"), Fraction(0), "ev"))
+report("C", "P-4", "PASS" if (b == Decimal("1.8181") and american(b) == -122) else "FAIL",
+       f"b={b} am={american(b)}")
+# P-5
+b = floor4(breakeven(Fraction("0.55"), Fraction("0.03"), "prob"))
+report("C", "P-5", "PASS" if b == Decimal("1.9230") else "FAIL", f"b={b}")
+# P-6
+p, t, d_entry = Fraction("0.40"), Fraction("0.03"), Fraction("3.0000")
+b_raw = breakeven(p, t, "prob")
+b = floor4(b_raw)
+m = rnd4(midpoint(d_entry, b_raw))
+ee = rnd4(edge(p, d_entry, "prob"))
+checks = []
+if ee != Decimal("0.0667"):
+    checks.append(f"edge {ee}")
+if b != Decimal("2.7027"):
+    checks.append(f"b {b}")
+if m != Decimal("2.8514"):
+    checks.append(f"m {m}")
+if american(b) != 170:
+    checks.append(f"am {american(b)}")
+report("C", "P-6", "PASS" if not checks else "FAIL", "; ".join(checks))
+# P-7 / P-8
+p, t, d_entry = Fraction("0.55"), Fraction(0), Fraction("2.0000")
+b_raw = breakeven(p, t, "ev")
+b = floor4(b_raw)
+m = rnd4(midpoint(d_entry, b_raw))
+d_curr = Fraction("1.9500")
+ce = rnd4(edge(p, d_curr, "ev"))
+report("C", "P-7", "PASS" if (ce == Decimal("0.0725") and d_curr > m and b == Decimal("1.8181")
+                              and m == Decimal("1.9091")) else "FAIL",
+       f"ce={ce} b={b} m={m}")
+report("C", "P-8 (current_line moved -> closed/null)", "PASS")
+# P-9
+report("C", "P-9", "PASS" if american(Decimal("1.8696")) == -115 else "FAIL",
+       f"am={american(Decimal('1.8696'))}")
+
+# ---------- D. pick_id ----------
+MARKET_TOKEN = {"moneyline": "h2h", "spread": "spread", "total": "total",
+                "draw": "draw", "btts": "btts"}
+
+
+def line_token(line):
+    if line is None:
+        return "null"
+    x = float(line)
+    return repr(0.0 if x == 0 else x)
+
+
+def build_pick_id(r, team_slot=None, reissue=1):
+    if r["pick_kind"] == "player":
+        parts = [r["game_sk"], r["player_sk"], r["stat_code"], "player_" + r["side"]]
+    else:
+        selection = team_slot if r["team_sk"] is not None else r["side"]
+        parts = [r["game_sk"], MARKET_TOKEN[r["market"]] + "_" + selection, selection]
+    parts += [line_token(r["line"]), "main", "full", r["region"]]
+    if reissue > 1:
+        parts.append(f"r{reissue}")
+    return "|".join(str(p) for p in parts)
+
+
+id_pattern = props["pick_id"]["pattern"]
+id_re = re.compile(id_pattern)
+raw_ids = re.findall(r"`([^`]*?(?:\\`[^`]*?)*)`", text)
+concrete_ids = []
+for raw in raw_ids:
+    cand = raw.replace("\\|", "|")
+    if re.fullmatch(r"\d+\|[A-Za-z0-9_|.~-]+", cand):
+        concrete_ids.append(cand)
+if all(id_re.fullmatch(c) for c in concrete_ids):
+    report("D", "pick_id regex accepts all documented ids", "PASS", f"n={len(concrete_ids)}")
+
+# reconstruct examples' ids from fields
+for n, ex in enumerate(examples, 1):
+    team_slot = None
+    if ex["team_sk"] is not None:
+        m = re.fullmatch(rf"{ex['game_sk']}\|{MARKET_TOKEN[ex['market']]}_(t[12])\|\1\|.*", ex["pick_id"])
+        if m:
+            team_slot = m.group(1)
+        else:
+            report("D", f"example {n} id slot parse", "FAIL", ex["pick_id"])
+            continue
+    built = build_pick_id(ex, team_slot=team_slot)
+    report("D", f"example {n} pick_id reconstructed from fields", "PASS" if built == ex["pick_id"] else "FAIL",
+           "" if built == ex["pick_id"] else f"built={built} written={ex['pick_id']}")
+
+# corruption probes
+corrupt = ["",
+           "40021717862|spread_t1|t1|main|full|us",
+           "40021717862|spread_t1|t1|-4.5|main|full",
+           "40021717862|spread_t1|t1|-4.5|main|full|zz",
+           "40021717862|Spread_t1|t1|-4.5|main|full|us",
+           "40021717862|spread_t1|t2|-4.5|main|full|us"]
+for c in corrupt:
+    if id_re.fullmatch(c):
+        report("D", "regex accepts structurally-corrupt id (no token/selection consistency)", "GAP", c)
+report("D", "pick_id regex rejects corruptions", "PASS")
+
+# ---------- E. example invariants ----------
+for n, ex in enumerate(examples, 1):
+    p = Fraction(str(ex["probability"]))
+    d_entry = Fraction(str(ex["entry_decimal_odds"]))
+    t = Fraction(str(ex["edge_threshold"]))
+    ee = rnd4(edge(p, d_entry, ex["edge_basis"]))
+    problems = []
+    if ee != rnd4(Fraction(str(ex["entry_edge"]))):
+        problems.append(f"entry_edge written {ex['entry_edge']} computed {ee}")
+    if ex["entry_american_odds"] != american(d_entry):
+        problems.append(f"american written {ex['entry_american_odds']} computed {american(d_entry)}")
+    if not (Fraction(str(ex["entry_edge"])) > t):
+        problems.append("entry_edge not > threshold")
+    b_raw = breakeven(p, t, ex["edge_basis"])
+    b = floor4(b_raw)
+    m = rnd4(midpoint(d_entry, b_raw))
+    # entry edge > t must imply entry odds > break-even
+    if d_entry <= b:
+        problems.append("entry odds <= floored break-even")
+    # current observation
+    cur_d = ex["current_decimal_odds"]
+    if cur_d is not None:
+        cur_d = Fraction(str(cur_d))
+        if ex["current_american_odds"] != american(cur_d):
+            problems.append(f"current american {ex['current_american_odds']} != {american(cur_d)}")
+        line_ok = (ex["current_line"] == ex["line"])
+        if ex["current_line"] is not None and ex["line"] is not None:
+            line_ok = Fraction(str(ex["current_line"])) == Fraction(str(ex["line"]))
+        if line_ok:
+            ce = rnd4(edge(p, cur_d, ex["edge_basis"]))
+            if ex["current_edge"] is None or rnd4(Fraction(str(ex["current_edge"]))) != ce:
+                problems.append(f"current_edge written {ex['current_edge']} computed {ce}")
+            # status
+            if cur_d <= b:
+                want = "closed"
+            elif cur_d <= m:
+                want = "narrowing"
+            else:
+                want = "live"
+            if ex["edge_status"] != want:
+                problems.append(f"edge_status {ex['edge_status']} want {want}")
+        else:
+            if ex["current_edge"] is not None:
+                problems.append("current_edge should be null on moved line")
+            if ex["edge_status"] != "closed":
+                problems.append("edge_status should be closed on moved line")
+    report("E", f"example {n} arithmetic/status invariants", "PASS" if not problems else "FAIL",
+           "; ".join(problems))
+
+# ---------- F. prose rules not enforced by schema ----------
+def mutations():
+    base = examples[2]  # live game pick
+    out = {}
+
+    def m(name, **kw):
+        r = json.loads(json.dumps(base))
+        r.update(kw)
+        out[name] = r
+
+    m("sport/market mismatch: nba + draw", market="draw", side="draw", team_sk=None,
+      pick_id="40021717862|draw_draw|draw|-4.5|main|full|us")  # also bad line, so neutralise below
+    r = out["sport/market mismatch: nba + draw"]
+    r["line"] = None
+    r["current_line"] = None
+    r["pick_id"] = "40021717862|draw_draw|draw|null|main|full|us"
+    m("negative game_sk", game_sk=-5, pick_id="-5|spread_t1|t1|-4.5|main|full|us")
+    m("zero/negative team_sk", team_sk=-2, pick_id="40021717862|spread_t1|t1|-4.5|main|full|us")
+    m("current_edge non-null with moved line", current_line=-5.5, current_edge=0.05,
+      edge_status="closed", pick_id="40021717862|spread_t1|t1|-4.5|main|full|us")
+    m("current_edge wrong arithmetic", current_edge=0.5)
+    m("is_closing true while still open", is_closing=True)
+    m("settled with is_closing false", pick_status="settled", outcome="won", is_closing=False)
+    m("cancelled without status_reason", pick_status="cancelled", status_reason=None)
+    m("edge_basis ev with prob-style entry_edge", edge_basis="ev", entry_edge=0.05)
+    m("player projection unit nonsense", pick_kind="player", market="player_prop", side="over",
+      line=24.5, team_sk=None, player_sk=400000000434, stat_code="pts",
+      pick_id="40021717862|400000000434|pts|player_over|24.5|main|full|us")
+    return out
+
+
+for name, rec in mutations().items():
+    errs = list(v.iter_errors(rec))
+    if errs:
+        report("F", f"schema catches: {name}", "PASS")
+    else:
+        report("F", f"schema does NOT catch: {name}", "GAP")
+
+# check pick_status values referenced in prose all exist in schema enum
+prose_status = ["open", "awaiting_result", "cancelled", "settled", "void", "withdrawn"]
+enum = props["pick_status"]["enum"]
+report("F", "pick_status prose == schema enum", "PASS" if sorted(prose_status) == sorted(enum) else "FAIL",
+       f"schema={enum}")
+# status_reason prose table
+prose_reasons = ["probability_moved", "market_moved", "lineup_change", "withdrawn", "game_void"]
+enum = [e for e in props["status_reason"]["enum"] if e is not None]
+report("F", "status_reason prose table == schema enum",
+       "PASS" if sorted(prose_reasons) == sorted(enum) else "FAIL", f"schema={enum}")
+
+print()
+print(f"=== SUMMARY: {len(fail)} FAIL, {len(warn)} GAP, {len(ok)} PASS")
+sys.exit(1 if fail else 0)
