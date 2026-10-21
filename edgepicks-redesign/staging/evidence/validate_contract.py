@@ -19,6 +19,10 @@ two false PASSes ("negative game_sk" was rejected only because its mutated pick_
 broke the id regex; "player projection unit nonsense" was rejected only because the
 spread example's negative current_line broke the positive-line rule). Probes for
 §3.5 items 13-15 (timestamps, positive keys, projection_unit, current_edge) added.
+Revision 2026-10-21 (contract revision 2): the contract path may be passed as the first
+argument; the draw probe keeps the base observation's edge values (valid on a line-less
+market) and the self-test uses a record rejected only on pick_id, so both hold for any
+contract revision.
 Revision 2026-10-21 (fifth pass): each probe tagged with the strength of the rule it
 tests; probes added for 4-dp odds, American derivation, entry_edge > threshold and
 observed_at; self-test for broken-probe classification; GAP summary by strength.
@@ -31,7 +35,8 @@ from fractions import Fraction
 
 import os
 
-MD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "conf-schema-contracts.md")
+MD = (sys.argv[1] if len(sys.argv) > 1 else
+      os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "conf-schema-contracts.md"))
 text = open(MD, encoding="utf-8").read()
 
 fail = []
@@ -366,8 +371,9 @@ def probes():
         out.append((name, r, set(fields), strength, ref))
 
     r = _copy(ex_game_live)
+    # line-less market: keep the base observation's current_edge/edge_status, which are
+    # also correct with line = null (b = 1/0.55, m = 1.9091, 1.95 > m -> live)
     r.update(market="draw", side="draw", team_sk=None, line=None, current_line=None,
-             current_edge=None, edge_status="closed",
              pick_id="40021717862|draw_draw|draw|null|main|full|us")
     out.append(("sport/market mismatch: nba + draw", r, {"sport", "market"},
                 "provisional", "§7.3 (marked Provisional)"))
@@ -453,12 +459,13 @@ for name, rec, fields, strength, ref in probes():
         judge(v_fmt, name, rec, fields, strength, ref,
               suffix=f" [FormatChecker; rfc3339-validator {_rfc}]", count=False)
 
-# Self-test: the record that produced the first capture's false PASS (negative
-# game_sk with a mutated pick_id that breaks the id regex) must be classified as a
-# broken probe, not as a schema catch.
+# Self-test: a record rejected ONLY on an unrelated field (here a malformed pick_id,
+# the failure mode behind the first capture's false PASS) while the probe claims to
+# test another field must be classified as a broken probe, not as a schema catch.
+# The tested field (stake_units) is left valid, so this holds for any contract revision.
 _bad = _copy(examples[2])
-_bad.update(game_sk=-5, pick_id="-5|spread_t1|t1|-4.5|main|full|us")
-_verdict, _hit = classify(v, _bad, {"game_sk"})
+_bad.update(pick_id="-5|spread_t1|t1|-4.5|main|full|us")
+_verdict, _hit = classify(v, _bad, {"stake_units"})
 report("F", "self-test: probe rejected only on an unrelated field is classified broken",
        "PASS" if _verdict == "FAIL" else "FAIL", f"classified {_verdict}, errors on {sorted(_hit)}")
 

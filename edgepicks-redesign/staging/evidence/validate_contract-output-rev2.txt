@@ -1,0 +1,66 @@
+# json blocks: 6; parsed: 6
+[PASS] A schema found
+[PASS] A examples found :: n=5
+[PASS] A schema is valid Draft 2020-12
+[PASS] A 37 required fields :: n=37
+[PASS] A required == properties :: req-prop=set() prop-req=set()
+[PASS] A additionalProperties false
+[PASS] A frozen field count 23
+[PASS] A frozen fields all in schema :: []
+[PASS] A every property required (closed shape)
+[PASS] B example 1 (us/nba/player)
+[PASS] B example 2 (au/epl/game)
+[PASS] B example 3 (us/nba/game)
+[PASS] B example 4 (us/nba/game)
+[PASS] B example 5 (us/nba/player)
+[PASS] C P-1 :: got 0.1073 want 0.1073
+[PASS] C P-2 :: got 0.0562 want 0.0562
+[PASS] C P-3 :: 5 pp -> 0.05
+[PASS] C P-4 :: b=1.8181 am=-122
+[PASS] C P-5 :: b=1.9230
+[PASS] C P-6
+[PASS] C P-7 :: ce=0.0725 b=1.8181 m=1.9091
+[PASS] C P-8 (current_line moved -> closed/null)
+[PASS] C P-9 :: am=-115
+[PASS] D pick_id regex accepts all documented ids :: n=10
+[PASS] D example 1 pick_id reconstructed from fields
+[PASS] D example 2 pick_id reconstructed from fields
+[PASS] D example 3 pick_id reconstructed from fields
+[PASS] D example 4 pick_id reconstructed from fields
+[PASS] D example 5 pick_id reconstructed from fields
+[GAP] D regex accepts structurally-corrupt id (no token/selection consistency) :: strength=explicit; ref=§8.2 selection segment; 40021717862|spread_t1|t2|-4.5|main|full|us
+[PASS] D pick_id regex rejects corruptions
+[PASS] E example 1 arithmetic/status invariants
+[PASS] E example 2 arithmetic/status invariants
+[PASS] E example 3 arithmetic/status invariants
+[PASS] E example 4 arithmetic/status invariants
+[PASS] E example 5 arithmetic/status invariants
+[GAP] F schema does NOT catch: sport/market mismatch: nba + draw :: strength=provisional; ref=§7.3 (marked Provisional)
+[PASS] F schema catches: negative game_sk :: error on ['game_sk']
+[PASS] F schema catches: zero/negative team_sk :: error on ['team_sk']
+[GAP] F schema does NOT catch: zero player_sk :: strength=not-stated; ref=field #11 and §7.1 say only 'Integer'
+[PASS] F schema catches: empty projection_unit :: error on ['projection_unit']
+[PASS] F schema catches: projection_value without projection_unit :: error on ['projection_unit']
+[GAP] F schema does NOT catch: entry_decimal_odds with 5 decimal places :: strength=explicit; ref=§2.3 'at most 4 decimal places'
+[GAP] F schema does NOT catch: entry_american_odds not derived from entry_decimal_odds :: strength=explicit; ref=§5.2 conversion
+[GAP] F schema does NOT catch: entry_edge not above edge_threshold :: strength=explicit; ref=§5.1 'Must satisfy entry_edge > edge_threshold'
+[GAP] F schema does NOT catch: edge_basis ev with prob-style entry_edge :: strength=explicit; ref=§5.1 formula, §7.2.6
+[GAP] F schema does NOT catch: current_edge null on unchanged line :: strength=explicit; ref=§5.3 rows 4-6 give current_edge as a Number
+[GAP] F schema does NOT catch: current_edge non-null with moved line :: strength=explicit; ref=§5.1 'current_edge must be null'
+[GAP] F schema does NOT catch: current_edge wrong arithmetic :: strength=explicit; ref=§5.1 formula
+[PASS] F schema catches: pick_date_time not a timestamp :: error on ['pick_date_time']
+[PASS] F schema catches: pick_date_time not a timestamp [FormatChecker; rfc3339-validator NOT installed] :: error on ['pick_date_time']
+[PASS] F schema catches: pick_date_time with offset, no ms, no Z :: error on ['pick_date_time']
+[PASS] F schema catches: pick_date_time with offset, no ms, no Z [FormatChecker; rfc3339-validator NOT installed] :: error on ['pick_date_time']
+[PASS] F schema catches: observed_at not a timestamp :: error on ['observed_at']
+[PASS] F schema catches: observed_at not a timestamp [FormatChecker; rfc3339-validator NOT installed] :: error on ['observed_at']
+[PASS] F schema catches: is_closing true while still open :: error on ['is_closing']
+[GAP] F schema does NOT catch: settled with is_closing false :: strength=implied; ref=Rule 5; legitimately reachable if the closing observation was missed (§3.5 item 2)
+[PASS] F schema catches: cancelled without status_reason :: error on ['status_reason']
+[PASS] F self-test: probe rejected only on an unrelated field is classified broken :: classified FAIL, errors on ['pick_id']
+[PASS] F pick_status prose == schema enum :: schema=['open', 'awaiting_result', 'cancelled', 'settled', 'void', 'withdrawn']
+[PASS] F status_reason prose table == schema enum :: schema=['probability_moved', 'market_moved', 'lineup_change', 'withdrawn', 'game_void']
+
+=== SUMMARY: 0 FAIL, 11 GAP, 50 PASS
+=== GAP probes (FormatChecker re-runs collapsed): 11 = explicit 8, implied 1, provisional 1, not-stated 1, permitted 0  [lower bound: cross-record Rules 1-3/6 and is_closing monotonicity not probed]
+=== environment: jsonschema 4.26.0, rfc3339-validator NOT installed
