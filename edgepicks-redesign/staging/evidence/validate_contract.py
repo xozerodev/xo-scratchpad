@@ -19,6 +19,9 @@ two false PASSes ("negative game_sk" was rejected only because its mutated pick_
 broke the id regex; "player projection unit nonsense" was rejected only because the
 spread example's negative current_line broke the positive-line rule). Probes for
 §3.5 items 13-15 (timestamps, positive keys, projection_unit, current_edge) added.
+Revision 2026-10-21 (fifth pass): each probe tagged with the strength of the rule it
+tests; probes added for 4-dp odds, American derivation, entry_edge > threshold and
+observed_at; self-test for broken-probe classification; GAP summary by strength.
 """
 import json
 import re
@@ -32,6 +35,7 @@ MD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "conf-schema
 text = open(MD, encoding="utf-8").read()
 
 fail = []
+GAP_STRENGTH = []  # (probe name, strength) for each distinct GAP probe
 warn = []
 ok = []
 
@@ -256,7 +260,9 @@ corrupt = ["",
            "40021717862|spread_t1|t2|-4.5|main|full|us"]
 for c in corrupt:
     if id_re.fullmatch(c):
-        report("D", "regex accepts structurally-corrupt id (no token/selection consistency)", "GAP", c)
+        report("D", "regex accepts structurally-corrupt id (no token/selection consistency)", "GAP",
+               f"strength=explicit; ref=§8.2 selection segment; {c}")
+        GAP_STRENGTH.append(("pick_id token/selection mismatch", "explicit"))
 report("D", "pick_id regex rejects corruptions", "PASS")
 
 # ---------- E. example invariants ----------
@@ -309,14 +315,26 @@ for n, ex in enumerate(examples, 1):
            "; ".join(problems))
 
 # ---------- F. prose rules not enforced by schema ----------
-# Each probe starts from a schema-valid §10 example and changes ONLY the field(s)
-# under test, so a rejection can be attributed to the rule being probed.
+# Each probe starts from a schema-valid §10 example and changes the field(s) under
+# test plus only what is needed to keep the rest of the record valid (e.g. the
+# draw probe must also change side/team_sk/line/pick_id; the cancelled and settled
+# probes change pick_status as their premise). A rejection can therefore be
+# attributed to the rule being probed.
 # Verdicts:
 #   PASS  the schema rejects the record AND at least one error is on a field under test
 #   GAP   the schema accepts the record (the prose rule is not enforced by the schema)
 #   FAIL  the probe is broken: the record is rejected only for an unrelated reason,
 #         so it says nothing about the rule (this is what produced two false PASSes
-#         in the first capture of this script).
+#         in the first capture of this script). A self-test below keeps this check honest.
+# Each probe carries the STRENGTH of the prose rule it tests:
+#   explicit     the contract states the rule (field table, formula, MUST-style text)
+#   implied      follows from rules/diagrams but is not stated as a constraint
+#   provisional  stated, but in a section the contract marks Provisional
+#   not-stated   no contract text requires it (probe kept to document the absence)
+#   permitted    the contract explicitly allows the "violating" record
+# The GAP list is a LOWER BOUND: cross-record rules (Rules 1-3 and 6: id rebuild
+# against the schedule, persistence, frozen fields, forward-only status) and
+# is_closing monotonicity need two records and are not probed here.
 # Timestamp probes are run twice: with the default validator (format is an
 # annotation in Draft 2020-12) and with FormatChecker(), whose `date-time` check
 # is silently skipped unless the optional `rfc3339-validator` package is installed.
@@ -329,6 +347,8 @@ try:
 except ImportError:
     _rfc = "NOT installed"
 
+TIMESTAMP_FIELDS = {"pick_date_time", "observed_at"}
+
 
 def _copy(ex):
     return json.loads(json.dumps(ex))
@@ -340,37 +360,61 @@ def probes():
     ex_player_proj = examples[4]   # §10.5 settled player prop with a projection
     out = []
 
-    def probe(name, base, fields, **kw):
+    def probe(name, base, fields, strength, ref, **kw):
         r = _copy(base)
         r.update(kw)
-        out.append((name, r, set(fields)))
+        out.append((name, r, set(fields), strength, ref))
 
     r = _copy(ex_game_live)
     r.update(market="draw", side="draw", team_sk=None, line=None, current_line=None,
              current_edge=None, edge_status="closed",
              pick_id="40021717862|draw_draw|draw|null|main|full|us")
-    out.append(("sport/market mismatch: nba + draw", r, {"sport", "market"}))
-    probe("negative game_sk", ex_game_live, ["game_sk"], game_sk=-5)
-    probe("zero/negative team_sk", ex_game_live, ["team_sk"], team_sk=-2)
-    probe("zero player_sk", ex_player_open, ["player_sk"], player_sk=0)
-    probe("empty projection_unit", ex_player_proj, ["projection_unit"], projection_unit="")
+    out.append(("sport/market mismatch: nba + draw", r, {"sport", "market"},
+                "provisional", "§7.3 (marked Provisional)"))
+    # keys and values
+    probe("negative game_sk", ex_game_live, ["game_sk"], "explicit",
+          "field #5 'Positive integer'", game_sk=-5)
+    probe("zero/negative team_sk", ex_game_live, ["team_sk"], "explicit",
+          "§7.1 matrix 'Integer (> 0)' (field #10 says only 'Integer')", team_sk=-2)
+    probe("zero player_sk", ex_player_open, ["player_sk"], "not-stated",
+          "field #11 and §7.1 say only 'Integer'", player_sk=0)
+    probe("empty projection_unit", ex_player_proj, ["projection_unit"], "explicit",
+          "field #15 'Non-empty string'", projection_unit="")
     probe("projection_value without projection_unit", ex_player_proj, ["projection_unit"],
-          projection_unit=None)
-    probe("pick_date_time not a timestamp", ex_game_live, ["pick_date_time"],
-          pick_date_time="yesterday")
-    probe("pick_date_time with offset, no ms, no Z", ex_game_live, ["pick_date_time"],
-          pick_date_time="2026-10-22T18:05:12+11:00")
-    probe("current_edge null on unchanged line", ex_game_live, ["current_edge"], current_edge=None)
-    probe("current_edge non-null with moved line", ex_game_live, ["current_edge", "current_line"],
-          current_line=-5.5, current_edge=0.05, edge_status="closed")
-    probe("current_edge wrong arithmetic", ex_game_live, ["current_edge"], current_edge=0.5)
-    probe("is_closing true while still open", ex_game_live, ["is_closing"], is_closing=True)
-    probe("settled with is_closing false", ex_game_live, ["is_closing", "pick_status"],
-          pick_status="settled", outcome="won", is_closing=False)
-    probe("cancelled without status_reason", ex_game_live, ["status_reason"],
-          pick_status="cancelled", status_reason=None)
+          "explicit", "field #14 'null iff projection_unit is null'", projection_unit=None)
+    # pricing and edge
+    probe("entry_decimal_odds with 5 decimal places", ex_game_live, ["entry_decimal_odds"],
+          "explicit", "§2.3 'at most 4 decimal places'", entry_decimal_odds=2.00001)
+    probe("entry_american_odds not derived from entry_decimal_odds", ex_game_live,
+          ["entry_american_odds"], "explicit", "§5.2 conversion", entry_american_odds=120)
+    probe("entry_edge not above edge_threshold", ex_game_live, ["edge_threshold", "entry_edge"],
+          "explicit", "§5.1 'Must satisfy entry_edge > edge_threshold'", edge_threshold=0.2)
     probe("edge_basis ev with prob-style entry_edge", ex_game_live, ["entry_edge", "edge_basis"],
-          edge_basis="ev", entry_edge=0.05)
+          "explicit", "§5.1 formula, §7.2.6", edge_basis="ev", entry_edge=0.05)
+    probe("current_edge null on unchanged line", ex_game_live, ["current_edge"], "explicit",
+          "§5.3 rows 4-6 give current_edge as a Number", current_edge=None)
+    probe("current_edge non-null with moved line", ex_game_live, ["current_edge", "current_line"],
+          "explicit", "§5.1 'current_edge must be null'", current_line=-5.5, current_edge=0.05,
+          edge_status="closed")
+    probe("current_edge wrong arithmetic", ex_game_live, ["current_edge"], "explicit",
+          "§5.1 formula", current_edge=0.5)
+    # timestamps
+    probe("pick_date_time not a timestamp", ex_game_live, ["pick_date_time"], "explicit",
+          "§2.4 'UTC ISO 8601 ... millisecond precision and a trailing Z'",
+          pick_date_time="yesterday")
+    probe("pick_date_time with offset, no ms, no Z", ex_game_live, ["pick_date_time"], "explicit",
+          "§2.4", pick_date_time="2026-10-22T18:05:12+11:00")
+    probe("observed_at not a timestamp", ex_game_live, ["observed_at"], "explicit", "§2.4",
+          observed_at="yesterday")
+    # lifecycle
+    probe("is_closing true while still open", ex_game_live, ["is_closing"], "implied",
+          "Rule 5 / §4.1 (closing coincides with game start -> awaiting_result)", is_closing=True)
+    probe("settled with is_closing false", ex_game_live, ["is_closing", "pick_status"], "implied",
+          "Rule 5; legitimately reachable if the closing observation was missed (§3.5 item 2)",
+          pick_status="settled", outcome="won", is_closing=False)
+    probe("cancelled without status_reason", ex_game_live, ["status_reason"], "permitted",
+          "§4.2 'Should be set'; §4.3 allows null 'if unknown'",
+          pick_status="cancelled", status_reason=None)
     return out
 
 
@@ -381,24 +425,42 @@ def _fields(err):
     return {w.strip("'") for w in re.findall(r"'([a-z_]+)'", err.message)}
 
 
-def judge(validator, name, rec, fields, suffix=""):
+def classify(validator, rec, fields):
     errs = list(validator.iter_errors(rec))
-    label = name + suffix
     if not errs:
-        report("F", f"schema does NOT catch: {label}", "GAP")
-        return
+        return "GAP", set()
     hit = set().union(*(_fields(e) for e in errs))
-    if hit & fields:
+    return ("PASS" if hit & fields else "FAIL"), hit
+
+
+def judge(validator, name, rec, fields, strength, ref, suffix="", count=True):
+    verdict, hit = classify(validator, rec, fields)
+    label = name + suffix
+    if verdict == "GAP":
+        report("F", f"schema does NOT catch: {label}", "GAP", f"strength={strength}; ref={ref}")
+        if count:
+            GAP_STRENGTH.append((name, strength))
+    elif verdict == "PASS":
         report("F", f"schema catches: {label}", "PASS", f"error on {sorted(hit & fields)}")
     else:
         report("F", f"probe broken (rejected for an unrelated reason): {label}", "FAIL",
                f"errors on {sorted(hit)}, expected one of {sorted(fields)}")
 
 
-for name, rec, fields in probes():
-    judge(v, name, rec, fields)
-    if "pick_date_time" in fields:
-        judge(v_fmt, name, rec, fields, suffix=f" [FormatChecker; rfc3339-validator {_rfc}]")
+for name, rec, fields, strength, ref in probes():
+    judge(v, name, rec, fields, strength, ref)
+    if fields & TIMESTAMP_FIELDS:
+        judge(v_fmt, name, rec, fields, strength, ref,
+              suffix=f" [FormatChecker; rfc3339-validator {_rfc}]", count=False)
+
+# Self-test: the record that produced the first capture's false PASS (negative
+# game_sk with a mutated pick_id that breaks the id regex) must be classified as a
+# broken probe, not as a schema catch.
+_bad = _copy(examples[2])
+_bad.update(game_sk=-5, pick_id="-5|spread_t1|t1|-4.5|main|full|us")
+_verdict, _hit = classify(v, _bad, {"game_sk"})
+report("F", "self-test: probe rejected only on an unrelated field is classified broken",
+       "PASS" if _verdict == "FAIL" else "FAIL", f"classified {_verdict}, errors on {sorted(_hit)}")
 
 # check pick_status values referenced in prose all exist in schema enum
 prose_status = ["open", "awaiting_result", "cancelled", "settled", "void", "withdrawn"]
@@ -412,5 +474,13 @@ report("F", "status_reason prose table == schema enum",
        "PASS" if sorted(prose_reasons) == sorted(enum) else "FAIL", f"schema={enum}")
 
 print()
+from collections import Counter
+_c = Counter(st for _, st in GAP_STRENGTH)
 print(f"=== SUMMARY: {len(fail)} FAIL, {len(warn)} GAP, {len(ok)} PASS")
+print(f"=== GAP probes (FormatChecker re-runs collapsed): {len(GAP_STRENGTH)} = "
+      + ", ".join(f"{k} {_c[k]}" for k in ("explicit", "implied", "provisional", "not-stated", "permitted"))
+      + "  [lower bound: cross-record Rules 1-3/6 and is_closing monotonicity not probed]")
+from importlib.metadata import version as _pkg_version
+print(f"=== environment: jsonschema {_pkg_version('jsonschema')}, "
+      f"rfc3339-validator {_rfc}")
 sys.exit(1 if fail else 0)
